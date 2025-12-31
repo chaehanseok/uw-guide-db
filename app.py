@@ -19,14 +19,10 @@ def load_db():
     conn = sqlite3.connect(tmp.name, check_same_thread=False)
     return conn
 
-
-# ✅ DB 연결 (이 줄이 핵심)
 conn = load_db()
-
 
 st.title("질병 심사 가이드 (Underwriting Guide)")
 
-# 질병 리스트
 diseases = pd.read_sql(
     "SELECT DISTINCT disease FROM uw_rows ORDER BY disease",
     conn
