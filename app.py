@@ -211,6 +211,7 @@ if "criteria_selectbox" not in st.session_state:
 # -------------------------
 # 1) 추천 UI: 표 + 라디오 + 적용 버튼
 # -------------------------
+
 st.subheader("질병명 검색/추천")
 
 colA, colB, colC = st.columns([3, 1, 1])
@@ -227,34 +228,62 @@ if query.strip():
     if rec_df.empty or rec_df["일치율(%)"].max() <= 0:
         st.info("추천 결과가 없습니다. 다른 키워드로 시도해 보세요.")
     else:
-        # 표 출력(정규화 컬럼은 옵션)
         show_df = rec_df.copy()
         if not show_norm:
             show_df = show_df.drop(columns=["정규화"])
 
-        st.dataframe(show_df, use_container_width=True, hide_index=True)
+        # ✅ 표처럼 보이는 단일 선택용 에디터
+        # - 왼쪽에 선택 라디오가 생김
+        # - 사용자가 체크/선택하면 즉시 아래에서 적용
+        show_df = show_df.reset_index(drop=True)
 
-        # 라디오 선택 (질병명)
-        candidates = rec_df["질병명"].tolist()
-        default_idx = 0
-        picked = st.radio(
-            "추천 결과에서 하나를 선택하세요",
-            options=candidates,
-            index=default_idx,
-            key="recommend_radio",
+        edited = st.data_editor(
+            show_df,
+            hide_index=True,
+            use_container_width=True,
+            disabled=list(show_df.columns),  # 데이터 편집 불가(표로만 사용)
+            num_rows="fixed",
+            column_config={
+                "질병명": st.column_config.TextColumn(width="large"),
+                "일치율(%)": st.column_config.NumberColumn(format="%.1f"),
+            },
+            key="rec_table_editor",
         )
 
-        c1, c2 = st.columns([1, 4])
-        with c1:
-            if st.button("선택 질병 적용", type="primary"):
-                st.session_state["disease_selectbox"] = picked
-                # 질병 바뀌면 criteria 초기화
+        # ✅ 단일 선택 구현:
+        # Streamlit 기본 data_editor에는 "행 클릭 이벤트"가 없어,
+        # 가장 안정적인 방식은 "선택 라디오 컬럼"을 하나 추가하는 것.
+        # 따라서 아래처럼 선택용 컬럼을 붙여서 다시 렌더링한다.
+
+        pick_df = show_df.copy()
+        pick_df.insert(0, "선택", False)
+
+        picked = st.data_editor(
+            pick_df,
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed",
+            column_config={
+                "선택": st.column_config.CheckboxColumn("선택", help="선택하면 아래 질병 리스트가 즉시 변경됩니다."),
+                "질병명": st.column_config.TextColumn(width="large"),
+                "일치율(%)": st.column_config.NumberColumn(format="%.1f"),
+            },
+            disabled=[c for c in pick_df.columns if c != "선택"],  # 선택만 가능
+            key="rec_pick_editor",
+        )
+
+        chosen_rows = picked[picked["선택"] == True]
+        if len(chosen_rows) > 0:
+            chosen_disease = chosen_rows.iloc[0]["질병명"]
+
+            # 여러 개 체크했어도 첫 번째만 사용 + 나머지는 자동 해제 유도
+            if st.session_state.get("disease_selectbox") != chosen_disease:
+                st.session_state["disease_selectbox"] = chosen_disease
                 st.session_state["criteria_selectbox"] = None
                 st.rerun()
-        with c2:
-            st.caption("‘선택 질병 적용’을 누르면 아래 ‘질병 리스트’가 해당 질병으로 변경됩니다.")
 
 st.divider()
+
 
 # -------------------------
 # 질병/심사기준 선택
