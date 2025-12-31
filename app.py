@@ -35,7 +35,6 @@ def get_db_asof_from_github(db_url: str) -> str:
 
 # =========================
 # DB 다운로드 -> temp path
-# (cache_data는 sqlite conn을 인자로 받으면 Unhashable 에러 나므로 path 기반으로 처리)
 # =========================
 @st.cache_data(ttl=3600)
 def download_db_to_temp(db_url: str) -> str:
@@ -144,6 +143,10 @@ def recommend_diseases(query: str, diseases: list[str]) -> pd.DataFrame:
     return df
 
 
+def _safe_key(s: str) -> str:
+    return re.sub(r"[^0-9a-zA-Z가-힣_]+", "_", str(s))
+
+
 # =========================
 # UI
 # =========================
@@ -170,10 +173,14 @@ if "criteria_selectbox" not in st.session_state:
     st.session_state["criteria_selectbox"] = None
 if "rec_selected_disease" not in st.session_state:
     st.session_state["rec_selected_disease"] = None
+if "last_auto_applied" not in st.session_state:
+    st.session_state["last_auto_applied"] = None
 
 
 # -------------------------
-# 1) 질병명 검색/추천 (체크박스 클릭 시 즉시 적용)
+# 1) 질병명 검색/추천
+#    - 단일 체크 강제
+#    - 추천 결과가 1개면 자동 적용
 # -------------------------
 st.subheader("질병명 검색/추천")
 
@@ -196,12 +203,25 @@ if query.strip():
     if rec_df.empty:
         st.info("조건에 맞는 추천 결과가 없습니다. 최소 일치율을 낮추거나 다른 키워드로 시도해 보세요.")
     else:
+        # ✅ (2) 추천 결과가 1개면 자동 적용 (무한 rerun 방지)
+        if len(rec_df) == 1:
+            only_disease = rec_df.iloc[0]["질병명"]
+            signature = f"{query}|{min_match}|{only_disease}"
+            if st.session_state["last_auto_applied"] != signature:
+                st.session_state["last_auto_applied"] = signature
+                st.session_state["rec_selected_disease"] = only_disease
+                st.session_state["disease_selectbox"] = only_disease
+                st.session_state["criteria_selectbox"] = None
+                st.rerun()
+
         show_df = rec_df[["질병명", "일치율(%)"]].copy()
         show_df.insert(0, "선택", False)
 
-        # 기존 선택 반영
+        # 기존 선택 반영(렌더링 단계에서 1개만 True)
         if st.session_state["rec_selected_disease"]:
-            show_df.loc[show_df["질병명"] == st.session_state["rec_selected_disease"], "선택"] = True
+            show_df.loc[
+                show_df["질병명"] == st.session_state["rec_selected_disease"], "선택"
+            ] = True
 
         edited = st.data_editor(
             show_df,
@@ -213,21 +233,29 @@ if query.strip():
                 "질병명": st.column_config.TextColumn(width="large"),
                 "일치율(%)": st.column_config.NumberColumn(format="%.1f"),
             },
-            # ✅ 체크박스만 편집 가능하게: 컬럼별 disabled 정확히 지정
-            disabled={"질병명": True, "일치율(%)": True},
+            disabled={"질병명": True, "일치율(%)": True},  # 체크만 편집 가능
             key="rec_table",
         )
 
-        # ✅ 단일 선택 강제 + 즉시 반영
-        chosen = edited[edited["선택"] == True]
-        if len(chosen) > 0:
-            new_choice = chosen.iloc[0]["질병명"]
+        # ✅ (1) 완전 단일 선택 UX
+        checked = edited[edited["선택"] == True]["질병명"].tolist()
+        if len(checked) >= 1:
+            prev = st.session_state["rec_selected_disease"]
+            # 여러 개가 체크되었으면, "이전 선택(prev)"을 제외한 새 선택을 우선
+            if prev and (prev in checked) and (len(checked) > 1):
+                new_choice = next((x for x in checked if x != prev), checked[0])
+            else:
+                new_choice = checked[0]
 
             if new_choice != st.session_state["rec_selected_disease"]:
                 st.session_state["rec_selected_disease"] = new_choice
                 st.session_state["disease_selectbox"] = new_choice
                 st.session_state["criteria_selectbox"] = None
                 st.rerun()
+            else:
+                # 같은 것을 다시 체크해도, 단일 True 상태로 강제 렌더링되도록 rerun
+                if len(checked) > 1:
+                    st.rerun()
 
 st.divider()
 
@@ -244,13 +272,61 @@ if not criteria_list:
     st.info("선택된 질병에 대한 심사기준이 없습니다.")
     st.stop()
 
-# criteria 세션 보정 (질병이 바뀌면 첫 criteria로 자동 세팅)
+# 질병 변경 시 criteria 자동 보정
 if (st.session_state["criteria_selectbox"] is None) or (st.session_state["criteria_selectbox"] not in criteria_list):
     st.session_state["criteria_selectbox"] = criteria_list[0]
 
 crit = st.selectbox("심사기준 선택", criteria_list, key="criteria_selectbox")
 
-df = load_benefit_decisions(DB_URL, disease, crit)
+df = load_benefit_decisions(DB_URL, disease, crit).copy()
 
+# -------------------------
+# 3) 급부별 인수 결과값(결정값) 요약 + 필터 체크
+#    - 요약: 결정값별 건수
+#    - 체크한 결정값만 표에 표시
+# -------------------------
 st.subheader("급부별 인수 결과")
-st.dataframe(df, use_container_width=True)
+
+# decision 정리
+df["decision"] = df["decision"].fillna("").astype(str)
+
+dec_counts = df["decision"].value_counts(dropna=False).sort_values(ascending=False)
+decisions = dec_counts.index.tolist()
+
+# 요약 문구(표 위)
+summary_parts = []
+for d in decisions:
+    label = d if d.strip() else "(빈값)"
+    summary_parts.append(f"{label}: {int(dec_counts[d])}")
+st.caption(" / ".join(summary_parts))
+
+# 필터 체크 UI
+st.markdown("**인수결과값 필터** (체크한 값만 아래 표에 표시)")
+
+# 초기값: 모두 True
+if "decision_filter_init" not in st.session_state:
+    st.session_state["decision_filter_init"] = True
+    for d in decisions:
+        st.session_state[f"decf_{_safe_key(d)}"] = True
+
+# 결정값 체크박스들을 가로로 배치
+cols = st.columns(min(6, max(1, len(decisions))))
+for i, d in enumerate(decisions):
+    key = f"decf_{_safe_key(d)}"
+    label = d if d.strip() else "(빈값)"
+    with cols[i % len(cols)]:
+        st.checkbox(f"{label} ({int(dec_counts[d])})", key=key)
+
+selected_decisions = []
+for d in decisions:
+    key = f"decf_{_safe_key(d)}"
+    if st.session_state.get(key, False):
+        selected_decisions.append(d)
+
+# 선택이 하나도 없으면 빈 표
+if selected_decisions:
+    df_view = df[df["decision"].isin(selected_decisions)].copy()
+else:
+    df_view = df.iloc[0:0].copy()
+
+st.dataframe(df_view, use_container_width=True)
