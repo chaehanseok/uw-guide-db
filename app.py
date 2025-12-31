@@ -14,6 +14,7 @@ import streamlit as st
 # 설정
 # =========================
 DB_URL = "https://raw.githubusercontent.com/chaehanseok/uw-guide-db/main/uw_knowledge.db"
+MAX_RECOMMENDATIONS = 50  # 추천 결과가 너무 많아지는 것 방지용(내부 상수)
 
 
 # =========================
@@ -34,8 +35,6 @@ def get_db_asof_from_github(db_url: str) -> str:
 
 # =========================
 # DB 다운로드(임시파일) + SQL 유틸
-# - cache_data가 sqlite conn을 hash 못해서,
-#   매번 temp db로 연결해서 읽고 닫는 방식(안정적)
 # =========================
 def _download_db_to_temp(db_url: str) -> str:
     r = requests.get(db_url, timeout=30)
@@ -141,19 +140,18 @@ def similarity(query_raw: str, disease_raw: str) -> float:
     return base
 
 
-def recommend_diseases(query: str, diseases: list[str], top_k: int = 10) -> pd.DataFrame:
+def recommend_diseases(query: str, diseases: list[str]) -> pd.DataFrame:
     q = (query or "").strip()
     if not q:
         return pd.DataFrame(columns=["질병명", "일치율(%)"])
 
     scored = [(d, similarity(q, d)) for d in diseases]
     scored.sort(key=lambda x: x[1], reverse=True)
-    top = scored[:top_k]
 
     df = pd.DataFrame(
         {
-            "질병명": [d for d, _ in top],
-            "일치율(%)": [(s * 100) for _, s in top],
+            "질병명": [d for d, _ in scored],
+            "일치율(%)": [(s * 100) for _, s in scored],
         }
     )
     df["일치율(%)"] = df["일치율(%)"].round(1)
@@ -194,14 +192,28 @@ if "rec_selected_disease" not in st.session_state:
 st.subheader("질병명 검색/추천")
 
 query = st.text_input("질병명을 입력하세요 (예: 척추염, 당뇨, 객혈 등)", value="")
-top_k = st.slider("추천 개수", min_value=3, max_value=20, value=10, step=1)
+
+min_match = st.slider(
+    "최소 일치율(%)",
+    min_value=0,
+    max_value=100,
+    value=70,
+    step=1,
+    help="이 값 이상인 추천만 표에 표시합니다.",
+)
 
 if query.strip():
-    rec_df = recommend_diseases(query, diseases, top_k=top_k)
+    rec_df = recommend_diseases(query, diseases)
 
-    if rec_df.empty or rec_df["일치율(%)"].max() <= 0:
-        st.info("추천 결과가 없습니다. 다른 키워드로 시도해 보세요.")
+    # 최소 일치율 필터
+    rec_df = rec_df[rec_df["일치율(%)"] >= float(min_match)].copy()
+
+    if rec_df.empty:
+        st.info("조건에 맞는 추천 결과가 없습니다. 최소 일치율을 낮추거나 다른 키워드로 시도해 보세요.")
     else:
+        # 너무 많으면 상위 N개만
+        rec_df = rec_df.head(MAX_RECOMMENDATIONS)
+
         show_df = rec_df[["질병명", "일치율(%)"]].copy()
         show_df.insert(0, "선택", False)
 
@@ -232,7 +244,6 @@ if query.strip():
         if len(chosen) > 0:
             new_choice = chosen.iloc[0]["질병명"]
 
-            # 여러 개 체크했더라도 첫 번째만 인정
             if new_choice != st.session_state["rec_selected_disease"]:
                 st.session_state["rec_selected_disease"] = new_choice
                 st.session_state["disease_selectbox"] = new_choice
@@ -257,7 +268,7 @@ if not criteria_list:
     st.info("선택된 질병에 대한 심사기준이 없습니다.")
     st.stop()
 
-# criteria 세션 보정 (질병 바뀔 때 None이거나 목록에 없으면 첫 값으로)
+# criteria 세션 보정
 if (
     st.session_state["criteria_selectbox"] is None
     or st.session_state["criteria_selectbox"] not in criteria_list
