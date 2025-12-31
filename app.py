@@ -17,19 +17,19 @@ def load_db():
     tmp.flush()
     tmp.close()
 
-    conn = sqlite3.connect(tmp.name, check_same_thread=False)
-    return conn
+    return sqlite3.connect(tmp.name, check_same_thread=False)
 
 conn = load_db()
 
 @st.cache_data
-def load_diseases(conn):
+def load_diseases():
     df = pd.read_sql("SELECT DISTINCT disease FROM uw_rows ORDER BY disease", conn)
     diseases = df["disease"].dropna().astype(str).str.strip().tolist()
     diseases = [d for d in diseases if d]
     return diseases
 
-diseases = load_diseases(conn)
+diseases = load_diseases()
+
 
 st.title("질병 심사 가이드 (Underwriting Guide)")
 
@@ -98,4 +98,5 @@ df = pd.read_sql(
 
 st.subheader("급부별 인수 결과")
 st.dataframe(df, use_container_width=True)
+
 
