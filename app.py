@@ -1,18 +1,28 @@
 import sqlite3
+import requests
+import tempfile
 import streamlit as st
 import pandas as pd
-import requests
-from io import BytesIO
 
 DB_URL = "https://raw.githubusercontent.com/chaehanseok/uw-guide-db/main/uw_knowledge.db"
 
-@st.cache_data
+@st.cache_resource
 def load_db():
-    r = requests.get(DB_URL)
+    r = requests.get(DB_URL, timeout=30)
     r.raise_for_status()
-    return sqlite3.connect(BytesIO(r.content))
 
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    tmp.write(r.content)
+    tmp.flush()
+    tmp.close()
+
+    conn = sqlite3.connect(tmp.name, check_same_thread=False)
+    return conn
+
+
+# ✅ DB 연결 (이 줄이 핵심)
 conn = load_db()
+
 
 st.title("질병 심사 가이드 (Underwriting Guide)")
 
