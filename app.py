@@ -42,7 +42,7 @@ query = st.text_input("질병명을 입력하세요 (예: 강직척추염, 객�
 
 # 추천 옵션
 TOP_N = 15
-MIN_SCORE = 65  # 추천 최소 유사도(0~100). 너무 낮으면 잡음 많아짐.
+MIN_SCORE = st.slider("추천 최소 점수", 0, 100, 65, 1)
 
 recommended = []
 if query.strip():
@@ -98,3 +98,4 @@ df = pd.read_sql(
 
 st.subheader("급부별 인수 결과")
 st.dataframe(df, use_container_width=True)
+
