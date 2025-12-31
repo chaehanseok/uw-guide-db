@@ -10,16 +10,9 @@ import pandas as pd
 import streamlit as st
 
 
-# =========================
-# 설정
-# =========================
 DB_URL = "https://raw.githubusercontent.com/chaehanseok/uw-guide-db/main/uw_knowledge.db"
-MAX_RECOMMENDATIONS = 30  # 추천 표 최대 표시 수
+MAX_RECOMMENDATIONS = 30
 
-
-# =========================
-# 유틸: GitHub Last-Modified로 기준일(asof) 추정
-# =========================
 @st.cache_data(ttl=3600)
 def get_db_asof_from_github(db_url: str) -> str:
     try:
@@ -33,9 +26,6 @@ def get_db_asof_from_github(db_url: str) -> str:
         return "기준일 미상"
 
 
-# =========================
-# DB 다운로드 -> temp path
-# =========================
 @st.cache_data(ttl=3600)
 def download_db_to_temp(db_url: str) -> str:
     r = requests.get(db_url, timeout=30)
@@ -96,9 +86,6 @@ def load_benefit_decisions(db_url: str, disease: str, criteria: str) -> pd.DataF
     return df
 
 
-# =========================
-# 검색/추천
-# =========================
 _norm_keep_kor_eng_num = re.compile(r"[^0-9a-zA-Z가-힣]+")
 
 def normalize_text(s: str) -> str:
@@ -114,14 +101,12 @@ def similarity(query_raw: str, disease_raw: str) -> float:
         return 0.0
 
     base = SequenceMatcher(None, qn, dn).ratio()
-
     if qn == dn:
         base = max(base, 0.999)
     elif qn in dn:
         base = min(1.0, base + 0.18)
     elif dn in qn:
         base = min(1.0, base + 0.10)
-
     return base
 
 
@@ -134,17 +119,10 @@ def recommend_diseases(query: str, diseases: list[str]) -> pd.DataFrame:
     scored.sort(key=lambda x: x[1], reverse=True)
 
     df = pd.DataFrame(
-        {
-            "질병명": [d for d, _ in scored],
-            "일치율(%)": [s * 100 for _, s in scored],
-        }
+        {"질병명": [d for d, _ in scored], "일치율(%)": [s * 100 for _, s in scored]}
     )
     df["일치율(%)"] = df["일치율(%)"].round(1)
     return df
-
-
-def _safe_key(s: str) -> str:
-    return re.sub(r"[^0-9a-zA-Z가-힣_]+", "_", str(s))
 
 
 # =========================
@@ -166,7 +144,7 @@ if not diseases:
     st.error("DB에서 질병 목록을 불러오지 못했습니다.")
     st.stop()
 
-# 세션 상태 초기화
+# 세션 상태
 if "disease_selectbox" not in st.session_state:
     st.session_state["disease_selectbox"] = diseases[0]
 if "criteria_selectbox" not in st.session_state:
@@ -178,32 +156,21 @@ if "last_auto_applied" not in st.session_state:
 
 
 # -------------------------
-# 1) 질병명 검색/추천
-#    - 단일 체크 강제
-#    - 추천 결과가 1개면 자동 적용
+# 검색/추천
 # -------------------------
 st.subheader("질병명 검색/추천")
 
 query = st.text_input("질병명을 입력하세요 (예: 척추염, 당뇨, 객혈 등)", value="")
-
-min_match = st.slider(
-    "최소 일치율(%)",
-    min_value=0,
-    max_value=100,
-    value=70,
-    step=1,
-    help="이 값 이상인 추천만 표시합니다.",
-)
+min_match = st.slider("최소 일치율(%)", 0, 100, 70, 1)
 
 if query.strip():
     rec_df = recommend_diseases(query, diseases)
-    rec_df = rec_df[rec_df["일치율(%)"] >= float(min_match)].copy()
-    rec_df = rec_df.head(MAX_RECOMMENDATIONS)
+    rec_df = rec_df[rec_df["일치율(%)"] >= float(min_match)].head(MAX_RECOMMENDATIONS)
 
     if rec_df.empty:
         st.info("조건에 맞는 추천 결과가 없습니다. 최소 일치율을 낮추거나 다른 키워드로 시도해 보세요.")
     else:
-        # ✅ (2) 추천 결과가 1개면 자동 적용 (무한 rerun 방지)
+        # 추천 결과가 1개면 자동 적용
         if len(rec_df) == 1:
             only_disease = rec_df.iloc[0]["질병명"]
             signature = f"{query}|{min_match}|{only_disease}"
@@ -217,31 +184,26 @@ if query.strip():
         show_df = rec_df[["질병명", "일치율(%)"]].copy()
         show_df.insert(0, "선택", False)
 
-        # 기존 선택 반영(렌더링 단계에서 1개만 True)
         if st.session_state["rec_selected_disease"]:
-            show_df.loc[
-                show_df["질병명"] == st.session_state["rec_selected_disease"], "선택"
-            ] = True
+            show_df.loc[show_df["질병명"] == st.session_state["rec_selected_disease"], "선택"] = True
 
         edited = st.data_editor(
             show_df,
             hide_index=True,
             use_container_width=True,
             num_rows="fixed",
+            disabled={"질병명": True, "일치율(%)": True},
             column_config={
-                "선택": st.column_config.CheckboxColumn("선택", help="체크하면 아래 질병 선택이 즉시 변경됩니다."),
+                "선택": st.column_config.CheckboxColumn("선택"),
                 "질병명": st.column_config.TextColumn(width="large"),
                 "일치율(%)": st.column_config.NumberColumn(format="%.1f"),
             },
-            disabled={"질병명": True, "일치율(%)": True},  # 체크만 편집 가능
             key="rec_table",
         )
 
-        # ✅ (1) 완전 단일 선택 UX
         checked = edited[edited["선택"] == True]["질병명"].tolist()
         if len(checked) >= 1:
             prev = st.session_state["rec_selected_disease"]
-            # 여러 개가 체크되었으면, "이전 선택(prev)"을 제외한 새 선택을 우선
             if prev and (prev in checked) and (len(checked) > 1):
                 new_choice = next((x for x in checked if x != prev), checked[0])
             else:
@@ -253,7 +215,6 @@ if query.strip():
                 st.session_state["criteria_selectbox"] = None
                 st.rerun()
             else:
-                # 같은 것을 다시 체크해도, 단일 True 상태로 강제 렌더링되도록 rerun
                 if len(checked) > 1:
                     st.rerun()
 
@@ -261,7 +222,7 @@ st.divider()
 
 
 # -------------------------
-# 2) 질병/심사기준 선택 + 결과
+# 질병/심사기준 선택
 # -------------------------
 st.subheader("질병 선택/조회")
 
@@ -272,61 +233,49 @@ if not criteria_list:
     st.info("선택된 질병에 대한 심사기준이 없습니다.")
     st.stop()
 
-# 질병 변경 시 criteria 자동 보정
 if (st.session_state["criteria_selectbox"] is None) or (st.session_state["criteria_selectbox"] not in criteria_list):
     st.session_state["criteria_selectbox"] = criteria_list[0]
 
 crit = st.selectbox("심사기준 선택", criteria_list, key="criteria_selectbox")
 
 df = load_benefit_decisions(DB_URL, disease, crit).copy()
+df["decision"] = df["decision"].fillna("").astype(str).str.strip()
+df["benefit"] = df["benefit"].fillna("").astype(str).str.strip()
 
 # -------------------------
-# 3) 급부별 인수 결과값(결정값) 요약 + 필터 체크
-#    - 요약: 결정값별 건수
-#    - 체크한 결정값만 표에 표시
+# ✅ 인수결과값 요약 + 필터링 (확실히 보이도록)
 # -------------------------
 st.subheader("급부별 인수 결과")
 
-# decision 정리
-df["decision"] = df["decision"].fillna("").astype(str)
+# 요약 테이블
+counts = df["decision"].replace("", "(빈값)").value_counts().reset_index()
+counts.columns = ["인수결과값", "건수"]
 
-dec_counts = df["decision"].value_counts(dropna=False).sort_values(ascending=False)
-decisions = dec_counts.index.tolist()
+# metric 형태 + 표 형태 둘 다 제공 (눈에 확 들어오게)
+c1, c2 = st.columns([1, 2])
+with c1:
+    st.metric("총 급부 수", int(len(df)))
+with c2:
+    st.dataframe(counts, hide_index=True, use_container_width=True)
 
-# 요약 문구(표 위)
-summary_parts = []
-for d in decisions:
-    label = d if d.strip() else "(빈값)"
-    summary_parts.append(f"{label}: {int(dec_counts[d])}")
-st.caption(" / ".join(summary_parts))
+# 필터: multiselect (필터 존재가 명확)
+all_decisions = counts["인수결과값"].tolist()
 
-# 필터 체크 UI
-st.markdown("**인수결과값 필터** (체크한 값만 아래 표에 표시)")
+# 기본값: 전체 선택
+default_selected = all_decisions
 
-# 초기값: 모두 True
-if "decision_filter_init" not in st.session_state:
-    st.session_state["decision_filter_init"] = True
-    for d in decisions:
-        st.session_state[f"decf_{_safe_key(d)}"] = True
+selected = st.multiselect(
+    "인수결과값 필터 (선택한 값만 아래 표에 표시)",
+    options=all_decisions,
+    default=default_selected,
+)
 
-# 결정값 체크박스들을 가로로 배치
-cols = st.columns(min(6, max(1, len(decisions))))
-for i, d in enumerate(decisions):
-    key = f"decf_{_safe_key(d)}"
-    label = d if d.strip() else "(빈값)"
-    with cols[i % len(cols)]:
-        st.checkbox(f"{label} ({int(dec_counts[d])})", key=key)
-
-selected_decisions = []
-for d in decisions:
-    key = f"decf_{_safe_key(d)}"
-    if st.session_state.get(key, False):
-        selected_decisions.append(d)
-
-# 선택이 하나도 없으면 빈 표
-if selected_decisions:
-    df_view = df[df["decision"].isin(selected_decisions)].copy()
+if not selected:
+    st.warning("필터가 모두 해제되어 표시할 데이터가 없습니다.")
+    st.dataframe(df.iloc[0:0], use_container_width=True)
 else:
-    df_view = df.iloc[0:0].copy()
+    df_view = df.copy()
+    df_view["decision_show"] = df_view["decision"].replace("", "(빈값)")
+    df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
 
-st.dataframe(df_view, use_container_width=True)
+    st.dataframe(df_view, use_container_width=True)
