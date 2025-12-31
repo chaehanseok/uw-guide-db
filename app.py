@@ -1,12 +1,13 @@
 import os
+import re
 import sqlite3
 import requests
 import tempfile
 from email.utils import parsedate_to_datetime
+from difflib import SequenceMatcher
 
 import pandas as pd
 import streamlit as st
-from difflib import SequenceMatcher
 
 
 # =========================
@@ -51,39 +52,35 @@ def load_db(db_url: str):
 # =========================
 # 데이터 로드(cache_data는 conn을 인자로 받지 않음)
 # =========================
-@st.cache_data(ttl=3600)
-def load_all_diseases(db_url: str) -> list[str]:
+def _download_db_to_temp(db_url: str) -> str:
     r = requests.get(db_url, timeout=30)
     r.raise_for_status()
-
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
     tmp.write(r.content)
     tmp.flush()
     tmp.close()
+    return tmp.name
 
-    c = sqlite3.connect(tmp.name)
+
+@st.cache_data(ttl=3600)
+def load_all_diseases(db_url: str) -> list[str]:
+    tmp_path = _download_db_to_temp(db_url)
+    c = sqlite3.connect(tmp_path)
     try:
         df = pd.read_sql("SELECT DISTINCT disease FROM uw_rows ORDER BY disease", c)
         return df["disease"].dropna().astype(str).tolist()
     finally:
         c.close()
         try:
-            os.remove(tmp.name)
+            os.remove(tmp_path)
         except Exception:
             pass
 
 
 @st.cache_data(ttl=3600)
 def load_criteria_for_disease(db_url: str, disease: str) -> list[str]:
-    r = requests.get(db_url, timeout=30)
-    r.raise_for_status()
-
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
-    tmp.write(r.content)
-    tmp.flush()
-    tmp.close()
-
-    c = sqlite3.connect(tmp.name)
+    tmp_path = _download_db_to_temp(db_url)
+    c = sqlite3.connect(tmp_path)
     try:
         df = pd.read_sql(
             "SELECT DISTINCT criteria FROM uw_rows WHERE disease = ? ORDER BY criteria",
@@ -94,22 +91,15 @@ def load_criteria_for_disease(db_url: str, disease: str) -> list[str]:
     finally:
         c.close()
         try:
-            os.remove(tmp.name)
+            os.remove(tmp_path)
         except Exception:
             pass
 
 
 @st.cache_data(ttl=3600)
 def load_benefit_decisions(db_url: str, disease: str, criteria: str) -> pd.DataFrame:
-    r = requests.get(db_url, timeout=30)
-    r.raise_for_status()
-
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
-    tmp.write(r.content)
-    tmp.flush()
-    tmp.close()
-
-    c = sqlite3.connect(tmp.name)
+    tmp_path = _download_db_to_temp(db_url)
+    c = sqlite3.connect(tmp_path)
     try:
         df = pd.read_sql(
             """
@@ -125,36 +115,68 @@ def load_benefit_decisions(db_url: str, disease: str, criteria: str) -> pd.DataF
     finally:
         c.close()
         try:
-            os.remove(tmp.name)
+            os.remove(tmp_path)
         except Exception:
             pass
 
 
 # =========================
-# 검색/추천
+# 검색/추천 (2) 정규화 기반 개선
 # =========================
-def similarity(a: str, b: str) -> float:
-    a = (a or "").strip()
-    b = (b or "").strip()
-    if not a or not b:
+_norm_keep_kor_eng_num = re.compile(r"[^0-9a-zA-Z가-힣]+")
+
+def normalize_text(s: str) -> str:
+    """
+    - 공백/특수문자 제거
+    - 소문자화
+    - 괄호/하이픈/슬래시 등 변형에 강함
+    """
+    s = (s or "").strip().lower()
+    s = _norm_keep_kor_eng_num.sub("", s)
+    return s
+
+
+def similarity(query_raw: str, disease_raw: str) -> float:
+    """
+    점수 설계(0~1):
+    - 정규화된 문자열로 SequenceMatcher
+    - 부분 포함 시 보너스(정확 일치/부분 일치 강화)
+    """
+    qn = normalize_text(query_raw)
+    dn = normalize_text(disease_raw)
+    if not qn or not dn:
         return 0.0
-    base = SequenceMatcher(None, a, b).ratio()  # 0~1
-    if a in b:
-        base = min(1.0, base + 0.15)
+
+    base = SequenceMatcher(None, qn, dn).ratio()
+
+    # 포함 보너스 (정규화 기준)
+    if qn == dn:
+        base = max(base, 0.999)
+    elif qn in dn:
+        base = min(1.0, base + 0.18)
+    elif dn in qn:
+        base = min(1.0, base + 0.10)
+
     return base
 
 
 def recommend_diseases(query: str, diseases: list[str], top_k: int = 10) -> pd.DataFrame:
     q = (query or "").strip()
     if not q:
-        return pd.DataFrame(columns=["disease", "score"])
+        return pd.DataFrame(columns=["질병명", "일치율(%)", "정규화"])
 
     scored = [(d, similarity(q, d)) for d in diseases]
     scored.sort(key=lambda x: x[1], reverse=True)
     top = scored[:top_k]
 
-    df = pd.DataFrame(top, columns=["disease", "score"])
-    df["score"] = (df["score"] * 100).round(1)
+    df = pd.DataFrame(
+        {
+            "질병명": [d for d, _ in top],
+            "일치율(%)": [(s * 100) for _, s in top],
+        }
+    )
+    df["일치율(%)"] = df["일치율(%)"].round(1)
+    df["정규화"] = df["질병명"].apply(normalize_text)
     return df
 
 
@@ -166,92 +188,93 @@ st.set_page_config(page_title="질병 심사 가이드", layout="wide")
 asof_yyyymmdd = get_db_asof_from_github(DB_URL)
 
 st.title("질병 심사 가이드\n(Underwriting Guide)")
-
 st.warning(
     "본 인수기준은 내부 교육용입니다. "
     f"({asof_yyyymmdd}, LoveAge Plan 질병심사메뉴얼 등록기준).\n"
     "변동 사항이 있을 수 있으며 실제 인수기준은 반드시 확인후 고객에게 안내 바랍니다."
 )
 
-# (선택) DB 연결(현재 화면에선 직접 query는 cache_data 쪽으로 하고 있지만,
-# 추후 확장 대비해서 리소스 캐시로 유지)
+# (연결 유지: 향후 확장 대비)
 _ = load_db(DB_URL)
 
-# 질병 목록
 diseases = load_all_diseases(DB_URL)
 if not diseases:
     st.error("DB에서 질병 목록을 불러오지 못했습니다.")
     st.stop()
 
-# ---------------------------------
-# 세션 상태: 위젯 key를 기준으로만 관리
-# ---------------------------------
+# 세션키: selectbox는 이 키로만 제어
 if "disease_selectbox" not in st.session_state:
     st.session_state["disease_selectbox"] = diseases[0]
+if "criteria_selectbox" not in st.session_state:
+    st.session_state["criteria_selectbox"] = None
 
-# criteria_selectbox는 disease 바뀔 때마다 재설정될 수 있으므로,
-# 아래에서 disease 확정 후 세팅합니다.
-
-# ---------------------------------
-# 추천(검색) 영역 + 추천 슬라이드(top_k)
-# ---------------------------------
+# -------------------------
+# 1) 추천 UI: 표 + 라디오 + 적용 버튼
+# -------------------------
 st.subheader("질병명 검색/추천")
 
-colA, colB = st.columns([3, 1])
+colA, colB, colC = st.columns([3, 1, 1])
 with colA:
     query = st.text_input("자연어로 질병명을 입력하세요 (예: 척추염, 당뇨, 객혈 등)", value="")
 with colB:
-    top_k = st.slider("추천 개수", min_value=3, max_value=20, value=10, step=1)  # ✅ 추천 슬라이드 복원
+    top_k = st.slider("추천 개수", min_value=3, max_value=20, value=10, step=1)
+with colC:
+    show_norm = st.checkbox("정규화 표시", value=False)
 
-rec_df = recommend_diseases(query, diseases, top_k=top_k)
+rec_df = recommend_diseases(query, diseases, top_k=top_k) if query.strip() else pd.DataFrame()
 
 if query.strip():
-    if rec_df.empty or rec_df["score"].max() <= 0:
+    if rec_df.empty or rec_df["일치율(%)"].max() <= 0:
         st.info("추천 결과가 없습니다. 다른 키워드로 시도해 보세요.")
     else:
-        st.caption("아래 추천 질병명을 클릭하면, 아래 ‘질병 리스트’ 선택이 즉시 해당 질병으로 변경됩니다.")
+        # 표 출력(정규화 컬럼은 옵션)
+        show_df = rec_df.copy()
+        if not show_norm:
+            show_df = show_df.drop(columns=["정규화"])
 
-        # 추천 리스트를 버튼으로 제공 (가장 확실하게 클릭 이벤트 처리)
-        for i, row in rec_df.iterrows():
-            d = row["disease"]
-            s = row["score"]
-            c1, c2 = st.columns([8, 2])
-            with c1:
-                if st.button(d, key=f"rec_btn_{i}"):
-                    # ✅ 핵심: selectbox key에 직접 값을 넣고 rerun
-                    st.session_state["disease_selectbox"] = d
-                    # 질병이 바뀌었으니 criteria도 초기화
-                    st.session_state.pop("criteria_selectbox", None)
-                    st.rerun()
-            with c2:
-                st.write(f"{s}%")
+        st.dataframe(show_df, use_container_width=True, hide_index=True)
+
+        # 라디오 선택 (질병명)
+        candidates = rec_df["질병명"].tolist()
+        default_idx = 0
+        picked = st.radio(
+            "추천 결과에서 하나를 선택하세요",
+            options=candidates,
+            index=default_idx,
+            key="recommend_radio",
+        )
+
+        c1, c2 = st.columns([1, 4])
+        with c1:
+            if st.button("선택 질병 적용", type="primary"):
+                st.session_state["disease_selectbox"] = picked
+                # 질병 바뀌면 criteria 초기화
+                st.session_state["criteria_selectbox"] = None
+                st.rerun()
+        with c2:
+            st.caption("‘선택 질병 적용’을 누르면 아래 ‘질병 리스트’가 해당 질병으로 변경됩니다.")
 
 st.divider()
 
-# ---------------------------------
+# -------------------------
 # 질병/심사기준 선택
-# ---------------------------------
+# -------------------------
 st.subheader("질병 선택/조회")
 
 disease = st.selectbox(
     "질병 리스트",
     diseases,
-    key="disease_selectbox",  # ✅ key 기반으로 값이 유지/변경됨
+    key="disease_selectbox",
 )
 
-# disease가 결정된 뒤 criteria 목록 로드
 criteria_list = load_criteria_for_disease(DB_URL, disease)
 if not criteria_list:
     st.warning("해당 질병의 심사기준이 없습니다.")
     st.stop()
 
-# criteria 초기 세팅(질병 변경 시 pop 했기 때문에 여기서 새로 잡힘)
-if "criteria_selectbox" not in st.session_state:
+# criteria 세션 보정
+if (st.session_state["criteria_selectbox"] is None) or (st.session_state["criteria_selectbox"] not in criteria_list):
     st.session_state["criteria_selectbox"] = criteria_list[0]
-else:
-    # 기존 값이 새 목록에 없으면 첫 값으로 보정
-    if st.session_state["criteria_selectbox"] not in criteria_list:
-        st.session_state["criteria_selectbox"] = criteria_list[0]
 
 crit = st.selectbox(
     "심사기준 선택",
