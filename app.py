@@ -2,11 +2,11 @@ import os
 import sqlite3
 import requests
 import tempfile
-from datetime import datetime
 from email.utils import parsedate_to_datetime
 
 import pandas as pd
 import streamlit as st
+from difflib import SequenceMatcher
 
 
 # =========================
@@ -16,7 +16,7 @@ DB_URL = "https://raw.githubusercontent.com/chaehanseok/uw-guide-db/main/uw_know
 
 
 # =========================
-# 유틸: GitHub Last-Modified로 asof 추정
+# 유틸: GitHub Last-Modified로 기준일(asof) 추정
 # =========================
 @st.cache_data(ttl=3600)
 def get_db_asof_from_github(db_url: str) -> str:
@@ -32,7 +32,7 @@ def get_db_asof_from_github(db_url: str) -> str:
 
 
 # =========================
-# DB 로드
+# DB 로드(리소스 캐시)
 # =========================
 @st.cache_resource
 def load_db(db_url: str):
@@ -49,12 +49,10 @@ def load_db(db_url: str):
 
 
 # =========================
-# 데이터 로드 (cache_data는 conn을 인자로 받지 않게!)
+# 데이터 로드(cache_data는 conn을 인자로 받지 않음)
 # =========================
 @st.cache_data(ttl=3600)
 def load_all_diseases(db_url: str) -> list[str]:
-    # cache_data에서 conn을 파라미터로 받으면 UnhashableParamError가 나므로
-    # 여기서는 임시로 새로 연결해서 읽고 닫습니다(가볍고 안정적).
     r = requests.get(db_url, timeout=30)
     r.raise_for_status()
 
@@ -133,19 +131,14 @@ def load_benefit_decisions(db_url: str, disease: str, criteria: str) -> pd.DataF
 
 
 # =========================
-# 검색/추천 로직 (외부 라이브러리 없이 구현)
-# - SequenceMatcher는 한글에서도 기본 유사도에 도움
-# - 추가로 "부분 포함"을 가산점으로 줌
+# 검색/추천
 # =========================
-from difflib import SequenceMatcher
-
 def similarity(a: str, b: str) -> float:
     a = (a or "").strip()
     b = (b or "").strip()
     if not a or not b:
         return 0.0
     base = SequenceMatcher(None, a, b).ratio()  # 0~1
-    # 부분 포함 가산점(짧은 키워드 검색에 체감 좋음)
     if a in b:
         base = min(1.0, base + 0.15)
     return base
@@ -156,15 +149,12 @@ def recommend_diseases(query: str, diseases: list[str], top_k: int = 10) -> pd.D
     if not q:
         return pd.DataFrame(columns=["disease", "score"])
 
-    scored = []
-    for d in diseases:
-        s = similarity(q, d)
-        scored.append((d, s))
-
+    scored = [(d, similarity(q, d)) for d in diseases]
     scored.sort(key=lambda x: x[1], reverse=True)
     top = scored[:top_k]
+
     df = pd.DataFrame(top, columns=["disease", "score"])
-    df["score"] = (df["score"] * 100).round(1)  # %
+    df["score"] = (df["score"] * 100).round(1)
     return df
 
 
@@ -173,10 +163,9 @@ def recommend_diseases(query: str, diseases: list[str], top_k: int = 10) -> pd.D
 # =========================
 st.set_page_config(page_title="질병 심사 가이드", layout="wide")
 
-# 기준일/경고 문구
 asof_yyyymmdd = get_db_asof_from_github(DB_URL)
 
-st.title("질병 심사 가이드 (Underwriting Guide)")
+st.title("질병 심사 가이드\n(Underwriting Guide)")
 
 st.warning(
     "본 인수기준은 내부 교육용입니다. "
@@ -184,93 +173,93 @@ st.warning(
     "변동 사항이 있을 수 있으며 실제 인수기준은 반드시 확인후 고객에게 안내 바랍니다."
 )
 
-# 질병 목록 로드
+# (선택) DB 연결(현재 화면에선 직접 query는 cache_data 쪽으로 하고 있지만,
+# 추후 확장 대비해서 리소스 캐시로 유지)
+_ = load_db(DB_URL)
+
+# 질병 목록
 diseases = load_all_diseases(DB_URL)
+if not diseases:
+    st.error("DB에서 질병 목록을 불러오지 못했습니다.")
+    st.stop()
 
-# 세션 상태: 선택 질병
-if "selected_disease" not in st.session_state:
-    st.session_state.selected_disease = diseases[0] if diseases else ""
+# ---------------------------------
+# 세션 상태: 위젯 key를 기준으로만 관리
+# ---------------------------------
+if "disease_selectbox" not in st.session_state:
+    st.session_state["disease_selectbox"] = diseases[0]
 
-# -------------------------
-# 자연어 검색 & 추천
-# -------------------------
-st.subheader("질병명 검색")
+# criteria_selectbox는 disease 바뀔 때마다 재설정될 수 있으므로,
+# 아래에서 disease 확정 후 세팅합니다.
 
-query = st.text_input("자연어로 질병명을 입력하세요 (예: 척추염, 당뇨, 객혈 등)", value="")
+# ---------------------------------
+# 추천(검색) 영역 + 추천 슬라이드(top_k)
+# ---------------------------------
+st.subheader("질병명 검색/추천")
 
-rec_df = recommend_diseases(query, diseases, top_k=10)
+colA, colB = st.columns([3, 1])
+with colA:
+    query = st.text_input("자연어로 질병명을 입력하세요 (예: 척추염, 당뇨, 객혈 등)", value="")
+with colB:
+    top_k = st.slider("추천 개수", min_value=3, max_value=20, value=10, step=1)  # ✅ 추천 슬라이드 복원
+
+rec_df = recommend_diseases(query, diseases, top_k=top_k)
 
 if query.strip():
     if rec_df.empty or rec_df["score"].max() <= 0:
         st.info("추천 결과가 없습니다. 다른 키워드로 시도해 보세요.")
     else:
-        st.caption("추천 결과를 클릭하면 아래 질병 선택이 자동으로 변경됩니다.")
+        st.caption("아래 추천 질병명을 클릭하면, 아래 ‘질병 리스트’ 선택이 즉시 해당 질병으로 변경됩니다.")
 
-        # 추천결과 클릭 UI: 버튼 리스트
-        # (Streamlit 기본 dataframe 클릭 이벤트가 제한적이므로 버튼이 가장 확실)
-        for _, row in rec_df.iterrows():
+        # 추천 리스트를 버튼으로 제공 (가장 확실하게 클릭 이벤트 처리)
+        for i, row in rec_df.iterrows():
             d = row["disease"]
             s = row["score"]
-            col1, col2 = st.columns([6, 1])
-            with col1:
-                if st.button(f"{d}", key=f"rec_{d}"):
-                    st.session_state.selected_disease = d
-                    st.session_state.selected_criteria = None  # 기준도 초기화
+            c1, c2 = st.columns([8, 2])
+            with c1:
+                if st.button(d, key=f"rec_btn_{i}"):
+                    # ✅ 핵심: selectbox key에 직접 값을 넣고 rerun
+                    st.session_state["disease_selectbox"] = d
+                    # 질병이 바뀌었으니 criteria도 초기화
+                    st.session_state.pop("criteria_selectbox", None)
                     st.rerun()
-            with col2:
+            with c2:
                 st.write(f"{s}%")
 
-# -------------------------
-# 질병 선택 (추천 클릭 시 자동 변경)
-# -------------------------
-st.subheader("질병 선택/조회")
+st.divider()
 
-# selectbox의 index는 질병 목록에서 찾아야 함
-try:
-    disease_index = diseases.index(st.session_state.selected_disease)
-except ValueError:
-    disease_index = 0
+# ---------------------------------
+# 질병/심사기준 선택
+# ---------------------------------
+st.subheader("질병 선택/조회")
 
 disease = st.selectbox(
     "질병 리스트",
     diseases,
-    index=disease_index,
-    key="disease_selectbox",
+    key="disease_selectbox",  # ✅ key 기반으로 값이 유지/변경됨
 )
 
-# 사용자가 selectbox로 바꿨으면 세션도 갱신
-if disease != st.session_state.selected_disease:
-    st.session_state.selected_disease = disease
-    st.session_state.selected_criteria = None
+# disease가 결정된 뒤 criteria 목록 로드
+criteria_list = load_criteria_for_disease(DB_URL, disease)
+if not criteria_list:
+    st.warning("해당 질병의 심사기준이 없습니다.")
+    st.stop()
 
-# 기준(심사기준) 로드
-criteria_list = load_criteria_for_disease(DB_URL, st.session_state.selected_disease)
-
-# 세션 상태: 선택 기준
-if "selected_criteria" not in st.session_state or st.session_state.selected_criteria is None:
-    st.session_state.selected_criteria = criteria_list[0] if criteria_list else ""
-
-# 기준 selectbox 인덱스
-try:
-    crit_index = criteria_list.index(st.session_state.selected_criteria)
-except ValueError:
-    crit_index = 0
+# criteria 초기 세팅(질병 변경 시 pop 했기 때문에 여기서 새로 잡힘)
+if "criteria_selectbox" not in st.session_state:
+    st.session_state["criteria_selectbox"] = criteria_list[0]
+else:
+    # 기존 값이 새 목록에 없으면 첫 값으로 보정
+    if st.session_state["criteria_selectbox"] not in criteria_list:
+        st.session_state["criteria_selectbox"] = criteria_list[0]
 
 crit = st.selectbox(
     "심사기준 선택",
     criteria_list,
-    index=crit_index,
     key="criteria_selectbox",
 )
 
-if crit != st.session_state.selected_criteria:
-    st.session_state.selected_criteria = crit
+df = load_benefit_decisions(DB_URL, disease, crit)
 
-# 결과 조회
-if st.session_state.selected_disease and st.session_state.selected_criteria:
-    df = load_benefit_decisions(DB_URL, st.session_state.selected_disease, st.session_state.selected_criteria)
-
-    st.subheader("급부별 인수 결과")
-    st.dataframe(df, use_container_width=True)
-else:
-    st.info("질병/심사기준이 비어 있습니다.")
+st.subheader("급부별 인수 결과")
+st.dataframe(df, use_container_width=True)
