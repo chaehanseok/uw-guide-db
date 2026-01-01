@@ -95,35 +95,64 @@ def normalize_text(s: str) -> str:
 
 
 def similarity(query_raw: str, disease_raw: str) -> float:
-    qn = normalize_text(query_raw)
-    dn = normalize_text(disease_raw)
+    q = (query_raw or "").strip()
+    d = (disease_raw or "").strip()
+    if not q or not d:
+        return 0.0
+
+    qn = normalize_text(q)
+    dn = normalize_text(d)
     if not qn or not dn:
         return 0.0
 
+    # 1) 짧은 검색어(1~2글자)는 "포함 검색"을 최우선
+    if len(qn) <= 2:
+        if qn in dn:
+            return 0.95  # 포함이면 거의 최상단
+        # 포함이 아니면 기존 유사도
+        return SequenceMatcher(None, qn, dn).ratio()
+
+    # 2) 일반 길이 검색어는 기존 로직 + 보너스
     base = SequenceMatcher(None, qn, dn).ratio()
+
     if qn == dn:
         base = max(base, 0.999)
     elif qn in dn:
-        base = min(1.0, base + 0.18)
+        base = min(1.0, base + 0.30)  # 포함 보너스 좀 더 강하게
     elif dn in qn:
         base = min(1.0, base + 0.10)
+
     return base
 
-
-def recommend_diseases(query: str, diseases: list[str]) -> pd.DataFrame:
+def recommend_diseases(query: str, diseases: list[str], top_k: int = 50) -> pd.DataFrame:
     q = (query or "").strip()
     if not q:
         return pd.DataFrame(columns=["질병명", "일치율(%)"])
 
-    scored = [(d, similarity(q, d)) for d in diseases]
-    scored.sort(key=lambda x: x[1], reverse=True)
+    qn = normalize_text(q)
 
-    df = pd.DataFrame(
-        {"질병명": [d for d, _ in scored], "일치율(%)": [s * 100 for _, s in scored]}
-    )
-    df["일치율(%)"] = df["일치율(%)"].round(1)
+    # ✅ 포함되는 것 먼저 싹 모으기 (특히 짧은 검색어에서 체감 개선)
+    contains = []
+    others = []
+    for d in diseases:
+        dn = normalize_text(d)
+        if qn and qn in dn:
+            contains.append(d)
+        else:
+            others.append(d)
+
+    # 포함 그룹은 전부 보여주고, 부족하면 others에서 점수순으로 채움
+    scored_others = [(d, similarity(q, d)) for d in others]
+    scored_others.sort(key=lambda x: x[1], reverse=True)
+
+    merged = [(d, 0.95) for d in contains] + scored_others
+    merged = merged[:top_k]
+
+    df = pd.DataFrame({
+        "질병명": [d for d, _ in merged],
+        "일치율(%)": [round(s * 100, 1) for _, s in merged],
+    })
     return df
-
 
 # =========================
 # UI
@@ -279,3 +308,4 @@ else:
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
 
     st.dataframe(df_view, use_container_width=True)
+
