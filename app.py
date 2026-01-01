@@ -14,17 +14,26 @@ DB_URL = "https://raw.githubusercontent.com/chaehanseok/uw-guide-db/main/uw_know
 MAX_RECOMMENDATIONS = 30
 
 @st.cache_data(ttl=3600)
-def get_db_asof_from_github(db_url: str) -> str:
+def get_db_asof_from_github_api(owner: str, repo: str, path: str) -> str:
+    """
+    GitHub API로 파일의 마지막 커밋 날짜를 가져온다.
+    """
+    api_url = f"https://api.github.com/repos/{owner}/{repo}/commits"
+    params = {"path": path, "per_page": 1}
+
     try:
-        r = requests.head(db_url, timeout=10)
-        lm = r.headers.get("Last-Modified")
-        if not lm:
+        r = requests.get(api_url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        if not data:
             return "기준일 미상"
-        dt = parsedate_to_datetime(lm)
+
+        commit_date = data[0]["commit"]["committer"]["date"]
+        dt = parsedate_to_datetime(commit_date)
         return dt.strftime("%Y-%m-%d")
+
     except Exception:
         return "기준일 미상"
-
 
 @st.cache_data(ttl=3600)
 def download_db_to_temp(db_url: str) -> str:
@@ -124,6 +133,7 @@ def similarity(query_raw: str, disease_raw: str) -> float:
 
     return base
 
+
 def recommend_diseases(query: str, diseases: list[str], top_k: int = 50) -> pd.DataFrame:
     q = (query or "").strip()
     if not q:
@@ -159,13 +169,21 @@ def recommend_diseases(query: str, diseases: list[str], top_k: int = 50) -> pd.D
 # =========================
 st.set_page_config(page_title="질병 심사 가이드", layout="wide")
 
-asof_yyyymmdd = get_db_asof_from_github(DB_URL)
+asof_yyyymmdd = get_db_asof_from_github_api(
+    owner="chaehanseok",
+    repo="uw-guide-db",
+    path="uw_knowledge.db"
+)
+
 
 st.title("질병 심사 가이드\n(Underwriting Guide)")
 st.warning(
-    "본 인수기준은 내부 교육용입니다. "
-    f"({asof_yyyymmdd}, LoveAge Plan 질병심사메뉴얼 등록기준).\n"
-    "변동 사항이 있을 수 있으며 실제 인수기준은 반드시 확인후 고객에게 안내 바랍니다."
+    f"이 자료는 미래에셋생명 LoveAge Plan 질병심사메뉴얼을 "
+    f"({asof_yyyymmdd}) 기준으로 수집한 자료입니다.\n\n"
+    "본 자료는 미래에셋금융서비스 구성원 대상 내부 교육자료이며, "
+    "질병별 인수기준은 수시로 변경될 수 있습니다.\n\n"
+    "고객 안내 및 청약 전에는 반드시 미래에셋생명에 "
+    "최신 인수기준을 직접 확인하시기 바랍니다."
 )
 
 diseases = load_all_diseases(DB_URL)
@@ -308,4 +326,3 @@ else:
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
 
     st.dataframe(df_view, use_container_width=True)
-
