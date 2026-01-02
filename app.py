@@ -13,16 +13,21 @@ DB_URL = "https://raw.githubusercontent.com/chaehanseok/uw-guide-db/main/uw_know
 
 @st.cache_data(ttl=3600)
 def get_db_asof_from_github(db_url: str) -> str:
+    """
+    ⚠️ 이름은 유지하지만, 실제로는 DB meta 테이블에서 기준일을 읽는다.
+    (GitHub 헤더 의존 제거)
+    """
     try:
-        r = requests.head(db_url, timeout=10)
-        lm = r.headers.get("Last-Modified")
-        if not lm:
-            return "미확인"
-        dt = parsedate_to_datetime(lm)
-        return dt.strftime("%Y-%m-%d")
+        db_path = download_db_to_temp(db_url)
+        df = _query_df(
+            db_path,
+            "SELECT value FROM meta WHERE key = 'as_of_date'"
+        )
+        if not df.empty:
+            return df.iloc[0]["value"]
+        return "미확인"
     except Exception:
         return "미확인"
-
 
 @st.cache_data(ttl=3600)
 def download_db_to_temp(db_url: str) -> str:
@@ -334,6 +339,7 @@ else:
     df_view["decision_show"] = df_view["decision"].replace("", "(빈값)")
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
     st.dataframe(df_view, use_container_width=True)
+
 
 
 
