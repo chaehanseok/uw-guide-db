@@ -164,9 +164,9 @@ asof_yyyymmdd = get_db_asof_from_github(DB_URL)
 st.title("질병 심사 가이드\n(Underwriting Guide)")
 st.warning(
     f"이 자료는 미래에셋생명 LoveAge Plan 질병심사메뉴얼을 "
-    f"({asof_yyyymmdd}) 기준으로 수집한 자료입니다.\n\n"
+    f"({asof_yyyymmdd}) 기준으로 수집한 자료입니다.\n"
     "본 자료는 미래에셋금융서비스 구성원 대상 내부 교육자료이며, "
-    "질병별 인수기준은 수시로 변경될 수 있습니다.\n\n"
+    "질병별 인수기준은 수시로 변경될 수 있습니다.\n"
     "고객 안내 및 청약 전에는 반드시 미래에셋생명에 "
     "최신 인수기준을 직접 확인하시기 바랍니다."
 )
@@ -253,5 +253,6 @@ else:
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
 
     st.dataframe(df_view, use_container_width=True)
+
 
 
