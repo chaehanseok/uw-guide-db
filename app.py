@@ -168,6 +168,9 @@ st.warning(
     "변동 사항이 있을 수 있으며 실제 인수기준은 반드시 확인후 고객에게 안내 바랍니다."
 )
 
+# -------------------------
+# DB 로드
+# -------------------------
 diseases = load_all_diseases(DB_URL)
 if not diseases:
     st.error("DB에서 질병 목록을 불러오지 못했습니다.")
@@ -175,77 +178,9 @@ if not diseases:
 
 # 세션 상태
 if "disease_selectbox" not in st.session_state:
-    st.session_state["disease_selectbox"] = diseases[0]
+    st.session_state["disease_selectbox"] = ""   # ✅ 초기값 공란
 if "criteria_selectbox" not in st.session_state:
     st.session_state["criteria_selectbox"] = None
-if "rec_selected_disease" not in st.session_state:
-    st.session_state["rec_selected_disease"] = None
-if "last_auto_applied" not in st.session_state:
-    st.session_state["last_auto_applied"] = None
-
-
-# -------------------------
-# 검색/추천
-# -------------------------
-st.subheader("질병명 검색/추천")
-
-query = st.text_input("질병명을 입력하세요 (예: 척추염, 당뇨, 객혈 등)", value="")
-min_match = st.slider("최소 일치율(%)", 0, 100, 70, 1)
-
-if query.strip():
-    rec_df = recommend_diseases(query, diseases)
-    rec_df = rec_df[rec_df["일치율(%)"] >= float(min_match)].head(MAX_RECOMMENDATIONS)
-
-    if rec_df.empty:
-        st.info("조건에 맞는 추천 결과가 없습니다. 최소 일치율을 낮추거나 다른 키워드로 시도해 보세요.")
-    else:
-        # 추천 결과가 1개면 자동 적용
-        if len(rec_df) == 1:
-            only_disease = rec_df.iloc[0]["질병명"]
-            signature = f"{query}|{min_match}|{only_disease}"
-            if st.session_state["last_auto_applied"] != signature:
-                st.session_state["last_auto_applied"] = signature
-                st.session_state["rec_selected_disease"] = only_disease
-                st.session_state["disease_selectbox"] = only_disease
-                st.session_state["criteria_selectbox"] = None
-                st.rerun()
-
-        show_df = rec_df[["질병명", "일치율(%)"]].copy()
-        show_df.insert(0, "선택", False)
-
-        if st.session_state["rec_selected_disease"]:
-            show_df.loc[show_df["질병명"] == st.session_state["rec_selected_disease"], "선택"] = True
-
-        edited = st.data_editor(
-            show_df,
-            hide_index=True,
-            use_container_width=True,
-            num_rows="fixed",
-            disabled={"질병명": True, "일치율(%)": True},
-            column_config={
-                "선택": st.column_config.CheckboxColumn("선택"),
-                "질병명": st.column_config.TextColumn(width="large"),
-                "일치율(%)": st.column_config.NumberColumn(format="%.1f"),
-            },
-            key="rec_table",
-        )
-
-        checked = edited[edited["선택"] == True]["질병명"].tolist()
-        if len(checked) >= 1:
-            prev = st.session_state["rec_selected_disease"]
-            if prev and (prev in checked) and (len(checked) > 1):
-                new_choice = next((x for x in checked if x != prev), checked[0])
-            else:
-                new_choice = checked[0]
-
-            if new_choice != st.session_state["rec_selected_disease"]:
-                st.session_state["rec_selected_disease"] = new_choice
-                st.session_state["disease_selectbox"] = new_choice
-                st.session_state["criteria_selectbox"] = None
-                st.rerun()
-            else:
-                if len(checked) > 1:
-                    st.rerun()
 
 st.divider()
 
@@ -255,7 +190,15 @@ st.divider()
 # -------------------------
 st.subheader("질병 선택/조회")
 
+# ✅ 공란 옵션 추가
+disease_options = [""] + diseases
+
 disease = st.selectbox("질병 선택", diseases, key="disease_selectbox")
+
+# ✅ 공란이면 아래 진행하지 않음
+if not disease:
+    st.info("질병을 선택해 주세요.")
+    st.stop()
 
 criteria_list = load_criteria_for_disease(DB_URL, disease)
 if not criteria_list:
