@@ -233,8 +233,8 @@ if not disease:
 common_info = load_common_info_for_disease(DB_URL, disease)
 
 # (디버그가 필요할 때만 잠깐)
-st.write("uw_rows columns:", sorted(list(_get_uw_rows_columns(DB_URL))))
-st.write("common_info:", common_info)
+# st.write("uw_rows columns:", sorted(list(_get_uw_rows_columns(DB_URL))))
+# st.write("common_info:", common_info)
 
 if common_info:
     st.subheader("질병 공통 안내")
@@ -296,3 +296,4 @@ else:
     df_view["decision_show"] = df_view["decision"].replace("", "(빈값)")
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
     st.dataframe(df_view, use_container_width=True)
+
