@@ -86,7 +86,7 @@ def load_criteria_for_disease(db_url: str, disease: str) -> list[str]:
         JOIN dim_criteria c ON c.id = u.criteria_id
         WHERE d.val = ?
           AND TRIM(COALESCE(c.val, '')) <> ''
-        ORDER BY c.val
+        ORDER BY c.sort_order
         """,
         params=(disease,),
     )
@@ -338,6 +338,7 @@ else:
     df_view["decision_show"] = df_view["decision"].replace("", "(빈값)")
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
     st.dataframe(df_view, use_container_width=True)
+
 
 
 
