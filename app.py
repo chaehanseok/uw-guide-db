@@ -7,6 +7,33 @@ from email.utils import parsedate_to_datetime
 import pandas as pd
 import streamlit as st
 
+# ✅ 여기(최상단)에 붙여넣기 ----------------------------
+import time, hmac, hashlib
+
+SECRET = st.secrets["UW_GATEWAY_SECRET"]
+
+def is_valid_token(token: str) -> bool:
+    if not token:
+        return False
+
+    now = int(time.time())
+    for delta in (-300, 0, 300):  # 5분 토큰, 오차 허용(±5분)
+        slot = (now + delta) // 300
+        expected = hmac.new(
+            SECRET.encode(),
+            str(slot).encode(),
+            hashlib.sha256
+        ).hexdigest()[:12]
+
+        if hmac.compare_digest(str(token), expected):
+            return True
+    return False
+
+token = st.query_params.get("token")
+if not is_valid_token(token):
+    st.error("이 페이지는 M-POST 메뉴를 통해서만 접근할 수 있습니다.")
+    st.stop()
+# -----------------------------------------------------
 
 DB_URL = "https://raw.githubusercontent.com/chaehanseok/uw-guide-db/main/uw_knowledge.db"
 
@@ -340,6 +367,7 @@ else:
     df_view["decision_show"] = df_view["decision"].replace("", "(빈값)")
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
     st.dataframe(df_view, use_container_width=True)
+
 
 
 
