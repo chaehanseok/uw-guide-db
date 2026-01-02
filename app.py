@@ -100,21 +100,32 @@ def load_benefit_decisions(db_url: str, disease: str, criteria: str) -> pd.DataF
 def load_common_info_for_disease(db_url: str, disease: str) -> dict:
     """
     질병별 공통항목(필요서류/진단/TIP)을 criteria와 무관하게 조회.
-    - 컬럼이 실제로 존재할 때만 조회
-    - 한글 컬럼명은 반드시 쌍따옴표로 quoting
+    - DB 컬럼명이 한글/영문 어느 쪽이든 동작하도록 후보를 둔다.
     """
     cols = _get_uw_rows_columns(db_url)
 
-    wanted = ["필요서류", "진단", "TIP"]
-    existing = [c for c in wanted if c in cols]
-    if not existing:
+    # 표시 라벨 -> (DB 컬럼 후보들)
+    col_candidates = {
+        "필요서류": ["필요서류", "need_doc", "need_docs", "required_docs", "documents"],
+        "진단": ["진단", "diagnosis", "dx"],
+        "TIP": ["TIP", "tip", "tips", "memo", "note", "비고", "유의사항"],
+    }
+
+    # 실제 존재하는 컬럼 매핑
+    col_map = {}
+    for label, cands in col_candidates.items():
+        for c in cands:
+            if c in cols:
+                col_map[label] = c
+                break
+
+    if not col_map:
         return {}
 
-    # SELECT 절을 존재하는 컬럼만 동적으로 구성
     select_exprs = []
-    for col in existing:
-        # 예: TRIM(COALESCE("필요서류", '')) AS "필요서류"
-        select_exprs.append(f'TRIM(COALESCE("{col}", \'\')) AS "{col}"')
+    for label, col in col_map.items():
+        # 컬럼명은 항상 안전하게 quoting
+        select_exprs.append(f'TRIM(COALESCE("{col}", \'\')) AS "{label}"')
 
     sql = f"""
     SELECT DISTINCT
@@ -127,9 +138,11 @@ def load_common_info_for_disease(db_url: str, disease: str) -> dict:
     df = _query_df(db_path, sql, params=(disease,))
 
     info = {}
-    for col in existing:
+    for label in ["필요서류", "진단", "TIP"]:
+        if label not in df.columns:
+            continue
         vals = (
-            df[col]
+            df[label]
             .dropna()
             .astype(str)
             .str.strip()
@@ -138,10 +151,9 @@ def load_common_info_for_disease(db_url: str, disease: str) -> dict:
             .tolist()
         )
         if vals:
-            info[col] = vals
+            info[label] = vals
 
     return info
-
 
 # =========================
 # UI
@@ -194,10 +206,22 @@ disease = st.selectbox(
     key="disease_selectbox",
 )
 
-# ✅ Streamlit에서 드롭다운 '아래 고정'은 공식 지원이 없어 강제 불가
-# 대신, selectbox 아래에 공간을 확보하면(특히 모바일 키보드 등장 시)
-# 아래로 열릴 확률이 크게 증가합니다.
-st.markdown("<div style='height: 35vh'></div>", unsafe_allow_html=True)
+# ✅ 모바일에서만 여백 확보(드롭다운 아래로 열릴 확률 증가)
+st.markdown(
+    """
+    <style>
+    @media (max-width: 768px) {
+      .mobile-spacer { height: 30vh; }
+    }
+    @media (min-width: 769px) {
+      .mobile-spacer { height: 0vh; }
+    }
+    </style>
+    <div class="mobile-spacer"></div>
+    """,
+    unsafe_allow_html=True
+)
+
 
 if not disease:
     st.info("질병명을 입력하거나 선택해 주세요.")
@@ -207,6 +231,11 @@ if not disease:
 # ✅ 질병 공통 정보(필요서류/진단/TIP) 표시 (criteria와 무관)
 # -------------------------
 common_info = load_common_info_for_disease(DB_URL, disease)
+
+# (디버그가 필요할 때만 잠깐)
+st.write("uw_rows columns:", sorted(list(_get_uw_rows_columns(DB_URL))))
+st.write("common_info:", common_info)
+
 if common_info:
     st.subheader("질병 공통 안내")
 
