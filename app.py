@@ -1,17 +1,15 @@
-import os
 import re
 import sqlite3
 import requests
 import tempfile
 from email.utils import parsedate_to_datetime
-from difflib import SequenceMatcher
 
 import pandas as pd
 import streamlit as st
 
 
 DB_URL = "https://raw.githubusercontent.com/chaehanseok/uw-guide-db/main/uw_knowledge.db"
-MAX_RECOMMENDATIONS = 30
+
 
 @st.cache_data(ttl=3600)
 def get_db_asof_from_github(db_url: str) -> str:
@@ -86,73 +84,43 @@ def load_benefit_decisions(db_url: str, disease: str, criteria: str) -> pd.DataF
     return df
 
 
-_norm_keep_kor_eng_num = re.compile(r"[^0-9a-zA-Z가-힣]+")
+@st.cache_data(ttl=3600)
+def load_common_info_for_disease(db_url: str, disease: str) -> dict:
+    """
+    질병별 공통항목(필요서류/진단/TIP)을 criteria와 무관하게 조회.
+    컬럼명은 '필요서류', '진단', 'TIP'으로 확정된 상태를 전제로 함.
+    """
+    db_path = download_db_to_temp(db_url)
 
-def normalize_text(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = _norm_keep_kor_eng_num.sub("", s)
-    return s
+    df = _query_df(
+        db_path,
+        """
+        SELECT DISTINCT
+            TRIM(COALESCE(필요서류, '')) AS 필요서류,
+            TRIM(COALESCE(진단, ''))     AS 진단,
+            TRIM(COALESCE(TIP, ''))      AS TIP
+        FROM uw_rows
+        WHERE disease = ?
+        """,
+        params=(disease,),
+    )
 
+    info = {}
+    for col in ["필요서류", "진단", "TIP"]:
+        vals = (
+            df[col]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .loc[lambda x: x != ""]
+            .unique()
+            .tolist()
+        )
+        if vals:
+            info[col] = vals
 
-def similarity(query_raw: str, disease_raw: str) -> float:
-    q = (query_raw or "").strip()
-    d = (disease_raw or "").strip()
-    if not q or not d:
-        return 0.0
+    return info
 
-    qn = normalize_text(q)
-    dn = normalize_text(d)
-    if not qn or not dn:
-        return 0.0
-
-    # 1) 짧은 검색어(1~2글자)는 "포함 검색"을 최우선
-    if len(qn) <= 2:
-        if qn in dn:
-            return 0.95  # 포함이면 거의 최상단
-        # 포함이 아니면 기존 유사도
-        return SequenceMatcher(None, qn, dn).ratio()
-
-    # 2) 일반 길이 검색어는 기존 로직 + 보너스
-    base = SequenceMatcher(None, qn, dn).ratio()
-
-    if qn == dn:
-        base = max(base, 0.999)
-    elif qn in dn:
-        base = min(1.0, base + 0.30)  # 포함 보너스 좀 더 강하게
-    elif dn in qn:
-        base = min(1.0, base + 0.10)
-
-    return base
-
-def recommend_diseases(query: str, diseases: list[str], top_k: int = 50) -> pd.DataFrame:
-    q = (query or "").strip()
-    if not q:
-        return pd.DataFrame(columns=["질병명", "일치율(%)"])
-
-    qn = normalize_text(q)
-
-    # ✅ 포함되는 것 먼저 싹 모으기 (특히 짧은 검색어에서 체감 개선)
-    contains = []
-    others = []
-    for d in diseases:
-        dn = normalize_text(d)
-        if qn and qn in dn:
-            contains.append(d)
-        else:
-            others.append(d)
-
-    # 포함 그룹은 전부 보여주고, 부족하면 others에서 점수순으로 채움
-    scored_others = [(d, similarity(q, d)) for d in others]
-    scored_others.sort(key=lambda x: x[1], reverse=True)
-
-    merged = [(d, 0.95) for d in contains] + scored_others
-    merged = merged[:top_k]
-
-    df = pd.DataFrame({
-        "질병명": [d for d, _ in merged],
-        "일치율(%)": [round(s * 100, 1) for _, s in merged],
-    })
-    return df
 
 # =========================
 # UI
@@ -162,6 +130,7 @@ st.set_page_config(page_title="질병 심사 가이드", layout="wide")
 asof_yyyymmdd = get_db_asof_from_github(DB_URL)
 
 st.title("질병 심사 가이드\n(Underwriting Guide)")
+
 msg = f"""
 이 자료는 미래에셋생명 LoveAge Plan 질병심사메뉴얼을
 ({asof_yyyymmdd}) 기준으로 수집한 자료입니다.<br>
@@ -173,7 +142,7 @@ msg = f"""
 
 with st.warning(""):
     st.markdown(msg, unsafe_allow_html=True)
-    
+
 # -------------------------
 # DB 로드
 # -------------------------
@@ -184,27 +153,58 @@ if not diseases:
 
 # 세션 상태
 if "disease_selectbox" not in st.session_state:
-    st.session_state["disease_selectbox"] = ""   # ✅ 초기값 공란
+    st.session_state["disease_selectbox"] = ""   # 초기값 공란
 if "criteria_selectbox" not in st.session_state:
     st.session_state["criteria_selectbox"] = None
 
 st.divider()
-
 
 # -------------------------
 # 질병/심사기준 선택
 # -------------------------
 st.subheader("질병 선택/조회")
 
-# ✅ 공란 옵션 추가
+# 공란 옵션 추가
 disease_options = [""] + diseases
 
-disease = st.selectbox("질병 선택", diseases, key="disease_selectbox")
+# ✅ (중요) options는 disease_options로 넣어야 공란이 표시됩니다.
+disease = st.selectbox(
+    "질병 선택",
+    disease_options,
+    key="disease_selectbox",
+    placeholder="질병명을 입력하거나 선택하세요",
+)
 
-# ✅ 공란이면 아래 진행하지 않음
+# ✅ 모바일에서 위로 열리는 현상 완화:
+# selectbox 바로 아래에 충분한 공간을 확보하면(특히 키보드가 올라오는 모바일)
+# 드롭다운이 아래로 열릴 가능성이 크게 증가합니다.
+st.markdown("<div style='height: 35vh'></div>", unsafe_allow_html=True)
+
 if not disease:
-    st.info("질병명을 입력해 주세요. 입력시 해당 단어를 포함한 질병명이 표시됩니다.")
+    st.info("질병명을 입력하거나 선택해 주세요.")
     st.stop()
+
+# -------------------------
+# ✅ 질병 공통 정보(필요서류/진단/TIP) 표시 (criteria와 무관)
+# -------------------------
+common_info = load_common_info_for_disease(DB_URL, disease)
+
+if common_info:
+    st.subheader("질병 공통 안내")
+
+    for label in ["필요서류", "진단", "TIP"]:
+        vals = common_info.get(label)
+        if not vals:
+            continue
+
+        with st.expander(label, expanded=True):
+            if len(vals) == 1:
+                st.write(vals[0])
+            else:
+                for v in vals:
+                    st.write(f"- {v}")
+
+    st.divider()
 
 criteria_list = load_criteria_for_disease(DB_URL, disease)
 if not criteria_list:
@@ -221,25 +221,20 @@ df["decision"] = df["decision"].fillna("").astype(str).str.strip()
 df["benefit"] = df["benefit"].fillna("").astype(str).str.strip()
 
 # -------------------------
-# ✅ 인수결과값 요약 + 필터링 (확실히 보이도록)
+# 인수결과값 요약 + 필터링
 # -------------------------
 st.subheader("급부별 인수 결과")
 
-# 요약 테이블
 counts = df["decision"].replace("", "(빈값)").value_counts().reset_index()
 counts.columns = ["인수결과값", "건수"]
 
-# metric 형태 + 표 형태 둘 다 제공 (눈에 확 들어오게)
 c1, c2 = st.columns([1, 2])
 with c1:
     st.metric("총 급부 수", int(len(df)))
 with c2:
     st.dataframe(counts, hide_index=True, use_container_width=True)
 
-# 필터: multiselect (필터 존재가 명확)
 all_decisions = counts["인수결과값"].tolist()
-
-# 기본값: 전체 선택
 default_selected = all_decisions
 
 selected = st.multiselect(
@@ -255,11 +250,4 @@ else:
     df_view = df.copy()
     df_view["decision_show"] = df_view["decision"].replace("", "(빈값)")
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
-
     st.dataframe(df_view, use_container_width=True)
-
-
-
-
-
-
