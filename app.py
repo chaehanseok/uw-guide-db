@@ -126,32 +126,34 @@ def load_common_info_for_disease(db_url: str, disease: str) -> dict:
         params=(disease,),
     )
 
-    def _uniq_nonempty(series: pd.Series) -> list[str]:
-        return (
-            series.dropna()
-            .astype(str)
-            .str.strip()
-            .loc[lambda x: x != ""]
-            .unique()
-            .tolist()
-        )
+def _uniq_nonempty(series: pd.Series) -> list[str]:
+    s = series.copy()
 
-    info = {}
-    if "need_doc" in df.columns:
-        v = _uniq_nonempty(df["need_doc"])
-        if v:
-            info["필요서류"] = v
-    if "diagnosis" in df.columns:
-        v = _uniq_nonempty(df["diagnosis"])
-        if v:
-            info["진단"] = v
-    if "tip" in df.columns:
-        v = _uniq_nonempty(df["tip"])
-        if v:
-            info["TIP"] = v
-    return info
+    # NaN 제거
+    s = s.dropna()
 
+    # 문자열화 + trim
+    s = s.astype(str).str.strip()
 
+    # "nan", "none" 같은 문자열 제거 (대소문자 무시)
+    s_lower = s.str.lower()
+    s = s[(s != "") & (s_lower != "nan") & (s_lower != "none")]
+
+    # 중복 제거
+    return s.unique().tolist()
+
+def _clean_vals(vals: list[str]) -> list[str]:
+    out = []
+    for v in vals:
+        t = (v or "").strip()
+        if not t:
+            continue
+        tl = t.lower()
+        if tl in ("nan", "none"):
+            continue
+        out.append(t)
+    return out
+    
 # =========================
 # UI
 # =========================
@@ -221,7 +223,7 @@ if common_info:
     st.subheader("질병 공통 안내")
 
     for label in ["필요서류", "진단", "TIP"]:
-        vals = common_info.get(label)
+        vals = _clean_vals(common_info.get(label, []))
         if not vals:
             continue
 
@@ -284,6 +286,7 @@ else:
     df_view["decision_show"] = df_view["decision"].replace("", "(빈값)")
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
     st.dataframe(df_view, use_container_width=True)
+
 
 
 
