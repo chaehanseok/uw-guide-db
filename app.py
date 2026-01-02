@@ -224,7 +224,7 @@ msg = f"""
 고객 안내 및 청약 전에는 반드시 최신 인수기준을 확인하시기 바랍니다.<br>
 """
 
-with st.warning(""):
+with st.error(""):
     st.markdown(msg, unsafe_allow_html=True)
 
 # -------------------------
@@ -338,6 +338,7 @@ else:
     df_view["decision_show"] = df_view["decision"].replace("", "(빈값)")
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
     st.dataframe(df_view, use_container_width=True)
+
 
 
 
