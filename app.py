@@ -58,9 +58,16 @@ def _get_uw_rows_columns(db_url: str) -> set[str]:
 @st.cache_data(ttl=3600)
 def load_all_diseases(db_url: str) -> list[str]:
     db_path = download_db_to_temp(db_url)
-    df = _query_df(db_path, "SELECT DISTINCT disease FROM uw_rows ORDER BY disease")
+    df = _query_df(
+        db_path,
+        """
+        SELECT val AS disease
+        FROM dim_disease
+        WHERE TRIM(COALESCE(val, '')) <> ''
+        ORDER BY val
+        """
+    )
     return df["disease"].dropna().astype(str).tolist()
-
 
 @st.cache_data(ttl=3600)
 def load_criteria_for_disease(db_url: str, disease: str) -> list[str]:
@@ -68,17 +75,17 @@ def load_criteria_for_disease(db_url: str, disease: str) -> list[str]:
     df = _query_df(
         db_path,
         """
-        SELECT DISTINCT criteria
-        FROM uw_rows
-        WHERE disease = ?
-          AND criteria IS NOT NULL
-          AND TRIM(criteria) <> ''
-        ORDER BY criteria
+        SELECT DISTINCT c.val AS criteria
+        FROM uw_rows u
+        JOIN dim_disease d  ON d.id = u.disease_id
+        JOIN dim_criteria c ON c.id = u.criteria_id
+        WHERE d.val = ?
+          AND TRIM(COALESCE(c.val, '')) <> ''
+        ORDER BY c.val
         """,
         params=(disease,),
     )
     return df["criteria"].dropna().astype(str).tolist()
-
 
 @st.cache_data(ttl=3600)
 def load_benefit_decisions(db_url: str, disease: str, criteria: str) -> pd.DataFrame:
@@ -86,74 +93,64 @@ def load_benefit_decisions(db_url: str, disease: str, criteria: str) -> pd.DataF
     df = _query_df(
         db_path,
         """
-        SELECT benefit, decision
-        FROM uw_rows
-        WHERE disease = ? AND criteria = ?
-        ORDER BY benefit
+        SELECT b.val AS benefit, de.val AS decision
+        FROM uw_rows u
+        JOIN dim_disease d   ON d.id = u.disease_id
+        JOIN dim_criteria c  ON c.id = u.criteria_id
+        JOIN dim_benefit b   ON b.id = u.benefit_id
+        JOIN dim_decision de ON de.id = u.decision_id
+        WHERE d.val = ? AND c.val = ?
+        ORDER BY b.val
         """,
         params=(disease, criteria),
     )
     return df
 
-
 @st.cache_data(ttl=3600)
 def load_common_info_for_disease(db_url: str, disease: str) -> dict:
-    """
-    질병별 공통항목(필요서류/진단/TIP)을 criteria와 무관하게 조회.
-    - DB 컬럼명이 한글/영문 어느 쪽이든 동작하도록 후보를 둔다.
-    """
-    cols = _get_uw_rows_columns(db_url)
-
-    # 표시 라벨 -> (DB 컬럼 후보들)
-    col_candidates = {
-        "필요서류": ["필요서류", "need_doc", "need_docs", "required_docs", "documents"],
-        "진단": ["진단", "diagnosis", "dx"],
-        "TIP": ["TIP", "tip", "tips", "memo", "note", "비고", "유의사항"],
-    }
-
-    # 실제 존재하는 컬럼 매핑
-    col_map = {}
-    for label, cands in col_candidates.items():
-        for c in cands:
-            if c in cols:
-                col_map[label] = c
-                break
-
-    if not col_map:
-        return {}
-
-    select_exprs = []
-    for label, col in col_map.items():
-        # 컬럼명은 항상 안전하게 quoting
-        select_exprs.append(f'TRIM(COALESCE("{col}", \'\')) AS "{label}"')
-
-    sql = f"""
-    SELECT DISTINCT
-        {", ".join(select_exprs)}
-    FROM uw_rows
-    WHERE disease = ?
-    """
-
     db_path = download_db_to_temp(db_url)
-    df = _query_df(db_path, sql, params=(disease,))
+    df = _query_df(
+        db_path,
+        """
+        SELECT DISTINCT
+            nd.val AS need_doc,
+            dx.val AS diagnosis,
+            tp.val AS tip
+        FROM uw_rows u
+        JOIN dim_disease d     ON d.id = u.disease_id
+        JOIN dim_need_doc nd   ON nd.id = u.need_doc_id
+        JOIN dim_diagnosis dx  ON dx.id = u.diagnosis_id
+        JOIN dim_tip tp        ON tp.id = u.tip_id
+        WHERE d.val = ?
+        """,
+        params=(disease,),
+    )
 
-    info = {}
-    for label in ["필요서류", "진단", "TIP"]:
-        if label not in df.columns:
-            continue
-        vals = (
-            df[label]
-            .dropna()
+    def _uniq_nonempty(series: pd.Series) -> list[str]:
+        return (
+            series.dropna()
             .astype(str)
             .str.strip()
             .loc[lambda x: x != ""]
             .unique()
             .tolist()
         )
-        if vals:
-            info[label] = vals
 
+    info = {}
+    if "need_doc" in df.columns:
+        v = _uniq_nonempty(df["need_doc"])
+        if v:
+            info["필요서류"] = v
+    if "diagnosis" in df.columns:
+        v = _uniq_nonempty(df["diagnosis"])
+        if v:
+            info["진단"] = v
+    if "tip" in df.columns:
+        v = _uniq_nonempty(df["tip"])
+        if v:
+            info["TIP"] = v
     return info
+
 
 # =========================
 # UI
@@ -287,6 +284,7 @@ else:
     df_view["decision_show"] = df_view["decision"].replace("", "(빈값)")
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
     st.dataframe(df_view, use_container_width=True)
+
 
 
 
