@@ -206,23 +206,6 @@ disease = st.selectbox(
     key="disease_selectbox",
 )
 
-# ✅ 모바일에서만 여백 확보(드롭다운 아래로 열릴 확률 증가)
-st.markdown(
-    """
-    <style>
-    @media (max-width: 768px) {
-      .mobile-spacer { height: 30vh; }
-    }
-    @media (min-width: 769px) {
-      .mobile-spacer { height: 0vh; }
-    }
-    </style>
-    <div class="mobile-spacer"></div>
-    """,
-    unsafe_allow_html=True
-)
-
-
 if not disease:
     st.info("질병명을 입력하거나 선택해 주세요.")
     st.stop()
@@ -296,4 +279,5 @@ else:
     df_view["decision_show"] = df_view["decision"].replace("", "(빈값)")
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
     st.dataframe(df_view, use_container_width=True)
+
 
