@@ -17,11 +17,11 @@ def get_db_asof_from_github(db_url: str) -> str:
         r = requests.head(db_url, timeout=10)
         lm = r.headers.get("Last-Modified")
         if not lm:
-            return "2025-12-31"
+            return "미확인"
         dt = parsedate_to_datetime(lm)
         return dt.strftime("%Y-%m-%d")
     except Exception:
-        return "2025-12-31"
+        return "미확인"
 
 
 @st.cache_data(ttl=3600)
@@ -287,6 +287,7 @@ else:
     df_view["decision_show"] = df_view["decision"].replace("", "(빈값)")
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
     st.dataframe(df_view, use_container_width=True)
+
 
 
 
