@@ -244,7 +244,14 @@ if not criteria_list:
 if (st.session_state["criteria_selectbox"] is None) or (st.session_state["criteria_selectbox"] not in criteria_list):
     st.session_state["criteria_selectbox"] = criteria_list[0]
 
-crit = st.selectbox("심사기준 선택", criteria_list, key="criteria_selectbox")
+st.subheader("심사기준 선택")
+
+crit = st.selectbox(
+    "",
+    criteria_list,
+    key="criteria_selectbox",
+)
+
 
 df = load_benefit_decisions(DB_URL, disease, crit).copy()
 df["decision"] = df["decision"].fillna("").astype(str).str.strip()
@@ -279,5 +286,6 @@ else:
     df_view["decision_show"] = df_view["decision"].replace("", "(빈값)")
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
     st.dataframe(df_view, use_container_width=True)
+
 
 
