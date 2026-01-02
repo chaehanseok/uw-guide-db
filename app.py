@@ -199,7 +199,7 @@ disease = st.selectbox("질병 선택", diseases, key="disease_selectbox")
 
 # ✅ 공란이면 아래 진행하지 않음
 if not disease:
-    st.info("질병을 선택해 주세요.")
+    st.info("질병명을 입력해 주세요. 입력시 해당 단어를 포함한 질병명이 표시됩니다.")
     st.stop()
 
 criteria_list = load_criteria_for_disease(DB_URL, disease)
@@ -253,4 +253,5 @@ else:
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
 
     st.dataframe(df_view, use_container_width=True)
+
 
