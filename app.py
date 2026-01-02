@@ -1,435 +1,310 @@
-# app.py
 import os
 import re
-import time
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
-
+import sqlite3
 import requests
+import tempfile
+from email.utils import parsedate_to_datetime
+from difflib import SequenceMatcher
+
+import pandas as pd
 import streamlit as st
 
-# =========================
-# Config
-# =========================
-APP_TITLE = "질병명칭 자동완성 기반 급부 조회/필터"
-DEFAULT_TIMEOUT = 20
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
 
-# 자동완성 UX 튜닝
-MIN_QUERY_LEN = 2          # 2글자부터 후보 조회
-DEBOUNCE_MS = 300          # 입력 후 300ms 정지 시 조회 (Streamlit은 이벤트 기반이라 간접 구현)
-MAX_SUGGESTIONS = 30       # 콤보 후보 최대
+DB_URL = "https://raw.githubusercontent.com/chaehanseok/uw-guide-db/main/uw_knowledge.db"
+MAX_RECOMMENDATIONS = 30
 
-
-# =========================
-# Utilities
-# =========================
-def _clean_text(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip())
-
-
-def _parse_csv_keywords(raw: str) -> List[str]:
-    if not raw:
-        return []
-    parts = re.split(r"[,\n]", raw)
-    return [p.strip() for p in parts if p.strip()]
-
-
-def _contains_any(text: str, keywords: List[str]) -> bool:
-    text = (text or "").lower()
-    kws = [k.strip().lower() for k in keywords if k.strip()]
-    if not kws:
-        return True
-    return any(k in text for k in kws)
-
-
-def _contains_none(text: str, keywords: List[str]) -> bool:
-    text = (text or "").lower()
-    kws = [k.strip().lower() for k in keywords if k.strip()]
-    if not kws:
-        return True
-    return all(k not in text for k in kws)
-
-
-def _safe_int(v: Any) -> Optional[int]:
+@st.cache_data(ttl=3600)
+def get_db_asof_from_github(db_url: str) -> str:
     try:
-        if v is None:
-            return None
-        if isinstance(v, (int, float)):
-            return int(v)
-        s = str(v).strip()
-        if s == "":
-            return None
-        m = re.search(r"-?\d+", s.replace(",", ""))
-        return int(m.group(0)) if m else None
+        r = requests.head(db_url, timeout=10)
+        lm = r.headers.get("Last-Modified")
+        if not lm:
+            return "기준일 미상"
+        dt = parsedate_to_datetime(lm)
+        return dt.strftime("%Y-%m-%d")
     except Exception:
-        return None
+        return "기준일 미상"
 
 
-def _safe_float(v: Any) -> Optional[float]:
+@st.cache_data(ttl=3600)
+def download_db_to_temp(db_url: str) -> str:
+    r = requests.get(db_url, timeout=30)
+    r.raise_for_status()
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    tmp.write(r.content)
+    tmp.flush()
+    tmp.close()
+    return tmp.name
+
+
+def _query_df(db_path: str, sql: str, params: tuple = ()) -> pd.DataFrame:
+    c = sqlite3.connect(db_path)
     try:
-        if v is None:
-            return None
-        if isinstance(v, (int, float)):
-            return float(v)
-        s = str(v).strip()
-        if s == "":
-            return None
-        s = s.replace(",", "")
-        m = re.search(r"-?\d+(\.\d+)?", s)
-        return float(m.group(0)) if m else None
-    except Exception:
-        return None
+        return pd.read_sql(sql, c, params=params)
+    finally:
+        c.close()
 
 
-# =========================
-# API Client
-# =========================
-class ApiClient:
-    def __init__(self, base_url: str):
-        self.base_url = base_url
+@st.cache_data(ttl=3600)
+def load_all_diseases(db_url: str) -> list[str]:
+    db_path = download_db_to_temp(db_url)
+    df = _query_df(db_path, "SELECT DISTINCT disease FROM uw_rows ORDER BY disease")
+    return df["disease"].dropna().astype(str).tolist()
 
-    def suggest_diseases_contains(self, query: str, limit: int = MAX_SUGGESTIONS) -> List[Dict[str, Any]]:
+
+@st.cache_data(ttl=3600)
+def load_criteria_for_disease(db_url: str, disease: str) -> list[str]:
+    db_path = download_db_to_temp(db_url)
+    df = _query_df(
+        db_path,
         """
-        '질병명칭 자동완성(contains)' 후보 조회.
-        - 검색 버튼 없음: 입력값 기반으로 여기서 후보를 반환한다.
-        - 서버가 contains로 내려주면 그대로 사용.
-        - 서버가 광범위하게 내려주면 클라에서 2차 contains 필터를 한다.
+        SELECT DISTINCT criteria
+        FROM uw_rows
+        WHERE disease = ?
+          AND criteria IS NOT NULL
+          AND TRIM(criteria) <> ''
+        ORDER BY criteria
+        """,
+        params=(disease,),
+    )
+    return df["criteria"].dropna().astype(str).tolist()
 
-        기대 응답(예시)
-        - 리스트 또는 {"items":[...]} 형태
-        - 각 아이템은 최소 id, name 포함
+
+@st.cache_data(ttl=3600)
+def load_benefit_decisions(db_url: str, disease: str, criteria: str) -> pd.DataFrame:
+    db_path = download_db_to_temp(db_url)
+    df = _query_df(
+        db_path,
         """
-        q = _clean_text(query)
-        if len(q) < MIN_QUERY_LEN:
-            return []
+        SELECT benefit, decision
+        FROM uw_rows
+        WHERE disease = ? AND criteria = ?
+        ORDER BY benefit
+        """,
+        params=(disease, criteria),
+    )
+    return df
 
-        # ### TODO: 실제 자동완성 엔드포인트로 변경
-        # 예) GET /api/diseases/suggest?q=...&limit=...
-        url = f"{self.base_url}/api/diseases/suggest"
-        params = {"q": q, "limit": limit}
 
-        r = requests.get(url, params=params, timeout=DEFAULT_TIMEOUT)
-        r.raise_for_status()
-        data = r.json()
+_norm_keep_kor_eng_num = re.compile(r"[^0-9a-zA-Z가-힣]+")
 
-        if isinstance(data, dict) and "items" in data and isinstance(data["items"], list):
-            items = data["items"]
-        elif isinstance(data, list):
-            items = data
+def normalize_text(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = _norm_keep_kor_eng_num.sub("", s)
+    return s
+
+
+def similarity(query_raw: str, disease_raw: str) -> float:
+    q = (query_raw or "").strip()
+    d = (disease_raw or "").strip()
+    if not q or not d:
+        return 0.0
+
+    qn = normalize_text(q)
+    dn = normalize_text(d)
+    if not qn or not dn:
+        return 0.0
+
+    # 1) 짧은 검색어(1~2글자)는 "포함 검색"을 최우선
+    if len(qn) <= 2:
+        if qn in dn:
+            return 0.95  # 포함이면 거의 최상단
+        # 포함이 아니면 기존 유사도
+        return SequenceMatcher(None, qn, dn).ratio()
+
+    # 2) 일반 길이 검색어는 기존 로직 + 보너스
+    base = SequenceMatcher(None, qn, dn).ratio()
+
+    if qn == dn:
+        base = max(base, 0.999)
+    elif qn in dn:
+        base = min(1.0, base + 0.30)  # 포함 보너스 좀 더 강하게
+    elif dn in qn:
+        base = min(1.0, base + 0.10)
+
+    return base
+
+def recommend_diseases(query: str, diseases: list[str], top_k: int = 50) -> pd.DataFrame:
+    q = (query or "").strip()
+    if not q:
+        return pd.DataFrame(columns=["질병명", "일치율(%)"])
+
+    qn = normalize_text(q)
+
+    # ✅ 포함되는 것 먼저 싹 모으기 (특히 짧은 검색어에서 체감 개선)
+    contains = []
+    others = []
+    for d in diseases:
+        dn = normalize_text(d)
+        if qn and qn in dn:
+            contains.append(d)
         else:
-            items = []
+            others.append(d)
 
-        # 서버가 contains를 보장하지 않는 경우를 대비한 2차 필터
-        q_low = q.lower()
-        out = []
-        for it in items:
-            name = str(it.get("name") or it.get("disease_name") or it.get("diseaseName") or "").strip()
-            if q_low in name.lower():
-                out.append(it)
+    # 포함 그룹은 전부 보여주고, 부족하면 others에서 점수순으로 채움
+    scored_others = [(d, similarity(q, d)) for d in others]
+    scored_others.sort(key=lambda x: x[1], reverse=True)
 
-        return out[:limit]
+    merged = [(d, 0.95) for d in contains] + scored_others
+    merged = merged[:top_k]
 
-    def get_benefits_by_disease(self, disease_id: str) -> List[Dict[str, Any]]:
-        # ### TODO: 실제 엔드포인트로 변경
-        url = f"{self.base_url}/api/diseases/{disease_id}/benefits"
-        r = requests.get(url, timeout=DEFAULT_TIMEOUT)
-        r.raise_for_status()
-        data = r.json()
-        if isinstance(data, dict) and "items" in data and isinstance(data["items"], list):
-            return data["items"]
-        if isinstance(data, list):
-            return data
-        return []
-
+    df = pd.DataFrame({
+        "질병명": [d for d, _ in merged],
+        "일치율(%)": [round(s * 100, 1) for _, s in merged],
+    })
+    return df
 
 # =========================
-# Filtering
+# UI
 # =========================
-@dataclass
-class BenefitFilters:
-    benefit_include: List[str]
-    benefit_exclude: List[str]
-    reason_include: List[str]
-    reason_exclude: List[str]
-    exclusion_include: List[str]
-    exclusion_exclude: List[str]
-    renew_types: List[str]
-    product_types: List[str]
-    pay_types: List[str]
-    min_pay_count: Optional[int]
-    max_pay_count: Optional[int]
-    min_pay_amount: Optional[float]
-    max_pay_amount: Optional[float]
+st.set_page_config(page_title="질병 심사 가이드", layout="wide")
+
+asof_yyyymmdd = get_db_asof_from_github(DB_URL)
+
+st.title("질병 심사 가이드\n(Underwriting Guide)")
+st.warning(
+    "본 인수기준은 내부 교육용입니다. "
+    f"({asof_yyyymmdd}, LoveAge Plan 질병심사메뉴얼 등록기준).\n"
+    "변동 사항이 있을 수 있으며 실제 인수기준은 반드시 확인후 고객에게 안내 바랍니다."
+)
+
+diseases = load_all_diseases(DB_URL)
+if not diseases:
+    st.error("DB에서 질병 목록을 불러오지 못했습니다.")
+    st.stop()
+
+# 세션 상태
+if "disease_selectbox" not in st.session_state:
+    st.session_state["disease_selectbox"] = diseases[0]
+if "criteria_selectbox" not in st.session_state:
+    st.session_state["criteria_selectbox"] = None
+if "rec_selected_disease" not in st.session_state:
+    st.session_state["rec_selected_disease"] = None
+if "last_auto_applied" not in st.session_state:
+    st.session_state["last_auto_applied"] = None
 
 
-def unique_values(benefits: List[Dict[str, Any]], keys: List[str]) -> List[str]:
-    vals = set()
-    for b in benefits:
-        for k in keys:
-            v = b.get(k)
-            if v is not None and str(v).strip():
-                vals.add(str(v).strip())
-    return sorted(vals)
+# -------------------------
+# 검색/추천
+# -------------------------
+st.subheader("질병명 검색/추천")
 
+query = st.text_input("질병명을 입력하세요 (예: 척추염, 당뇨, 객혈 등)", value="")
+min_match = st.slider("최소 일치율(%)", 0, 100, 70, 1)
 
-def apply_benefit_filters(benefits: List[Dict[str, Any]], f: BenefitFilters) -> List[Dict[str, Any]]:
-    def get_field(b: Dict[str, Any], *keys: str) -> str:
-        for k in keys:
-            v = b.get(k)
-            if v is not None:
-                return str(v)
-        return ""
+if query.strip():
+    rec_df = recommend_diseases(query, diseases)
+    rec_df = rec_df[rec_df["일치율(%)"] >= float(min_match)].head(MAX_RECOMMENDATIONS)
 
-    def get_num(b: Dict[str, Any], *keys: str) -> Optional[float]:
-        for k in keys:
-            if k in b and b.get(k) is not None:
-                return _safe_float(b.get(k))
-        return None
-
-    filtered: List[Dict[str, Any]] = []
-
-    for b in benefits:
-        benefit_name = get_field(b, "benefit_name", "benefitNm", "급부명", "담보명")
-        pay_reason = get_field(b, "pay_reason", "payReason", "지급사유", "지급조건")
-        exclusion = get_field(b, "exclusion", "exclusionText", "면책", "면책사항")
-        renew_type = get_field(b, "renew_type", "renewType", "갱신구분")
-        product_type = get_field(b, "product_type", "productType", "계약구분", "주특약구분")
-        pay_type = get_field(b, "pay_type", "payType", "급부유형", "지급유형")
-
-        pay_limit_count = get_num(b, "pay_limit_count", "payLimitCount", "지급횟수", "한도횟수")
-        pay_limit_amount = get_num(b, "pay_limit_amount", "payLimitAmount", "지급한도", "한도금액")
-
-        if not _contains_any(benefit_name, f.benefit_include):
-            continue
-        if not _contains_none(benefit_name, f.benefit_exclude):
-            continue
-
-        if not _contains_any(pay_reason, f.reason_include):
-            continue
-        if not _contains_none(pay_reason, f.reason_exclude):
-            continue
-
-        if not _contains_any(exclusion, f.exclusion_include):
-            continue
-        if not _contains_none(exclusion, f.exclusion_exclude):
-            continue
-
-        if f.renew_types and renew_type not in f.renew_types:
-            continue
-        if f.product_types and product_type not in f.product_types:
-            continue
-        if f.pay_types and pay_type not in f.pay_types:
-            continue
-
-        if f.min_pay_count is not None:
-            c = _safe_int(pay_limit_count)
-            if c is None or c < f.min_pay_count:
-                continue
-        if f.max_pay_count is not None:
-            c = _safe_int(pay_limit_count)
-            if c is None or c > f.max_pay_count:
-                continue
-
-        if f.min_pay_amount is not None:
-            a = _safe_float(pay_limit_amount)
-            if a is None or a < f.min_pay_amount:
-                continue
-        if f.max_pay_amount is not None:
-            a = _safe_float(pay_limit_amount)
-            if a is None or a > f.max_pay_amount:
-                continue
-
-        filtered.append(b)
-
-    return filtered
-
-
-def render_filters(benefits: List[Dict[str, Any]]) -> BenefitFilters:
-    st.subheader("급부 필터")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        benefit_include_raw = st.text_area("급부명 포함 키워드 (쉼표/줄바꿈)", height=80, key="benefit_include")
-        benefit_exclude_raw = st.text_area("급부명 제외 키워드 (쉼표/줄바꿈)", height=80, key="benefit_exclude")
-
-        reason_include_raw = st.text_area("지급사유/조건 포함 키워드 (쉼표/줄바꿈)", height=80, key="reason_include")
-        reason_exclude_raw = st.text_area("지급사유/조건 제외 키워드 (쉼표/줄바꿈)", height=80, key="reason_exclude")
-
-        excl_include_raw = st.text_area("면책/감액/대기 관련 포함 키워드 (쉼표/줄바꿈)", height=80, key="excl_include")
-        excl_exclude_raw = st.text_area("면책/감액/대기 관련 제외 키워드 (쉼표/줄바꿈)", height=80, key="excl_exclude")
-
-    with col2:
-        renew_options = unique_values(benefits, ["renew_type", "renewType", "갱신구분"])
-        product_options = unique_values(benefits, ["product_type", "productType", "주특약구분", "계약구분"])
-        paytype_options = unique_values(benefits, ["pay_type", "payType", "급부유형", "지급유형"])
-
-        renew_types = st.multiselect("갱신구분", options=renew_options, default=[], key="renew_types")
-        product_types = st.multiselect("주/특약 구분", options=product_options, default=[], key="product_types")
-        pay_types = st.multiselect("급부유형(진단/입원/수술/통원 등)", options=paytype_options, default=[], key="pay_types")
-
-        st.markdown("#### 숫자 조건")
-        c1, c2 = st.columns(2)
-        with c1:
-            min_pay_count = st.number_input("최소 지급횟수 (0이면 미적용)", min_value=0, value=0, step=1, key="min_pay_count")
-            min_pay_count = None if min_pay_count == 0 else int(min_pay_count)
-        with c2:
-            max_pay_count = st.number_input("최대 지급횟수 (0이면 미적용)", min_value=0, value=0, step=1, key="max_pay_count")
-            max_pay_count = None if max_pay_count == 0 else int(max_pay_count)
-
-        a1, a2 = st.columns(2)
-        with a1:
-            min_pay_amount = st.number_input("최소 한도금액 (0이면 미적용)", min_value=0.0, value=0.0, step=10000.0, key="min_pay_amount")
-            min_pay_amount = None if min_pay_amount == 0 else float(min_pay_amount)
-        with a2:
-            max_pay_amount = st.number_input("최대 한도금액 (0이면 미적용)", min_value=0.0, value=0.0, step=10000.0, key="max_pay_amount")
-            max_pay_amount = None if max_pay_amount == 0 else float(max_pay_amount)
-
-    return BenefitFilters(
-        benefit_include=_parse_csv_keywords(benefit_include_raw),
-        benefit_exclude=_parse_csv_keywords(benefit_exclude_raw),
-        reason_include=_parse_csv_keywords(reason_include_raw),
-        reason_exclude=_parse_csv_keywords(reason_exclude_raw),
-        exclusion_include=_parse_csv_keywords(excl_include_raw),
-        exclusion_exclude=_parse_csv_keywords(excl_exclude_raw),
-        renew_types=renew_types,
-        product_types=product_types,
-        pay_types=pay_types,
-        min_pay_count=min_pay_count,
-        max_pay_count=max_pay_count,
-        min_pay_amount=min_pay_amount,
-        max_pay_amount=max_pay_amount,
-    )
-
-
-def render_benefits(disease: Dict[str, Any], benefits: List[Dict[str, Any]], filtered: List[Dict[str, Any]]) -> None:
-    st.subheader("조회 결과")
-
-    left, right = st.columns([2, 1])
-    with left:
-        st.markdown("**선택된 질병**")
-        st.json(disease)
-    with right:
-        st.metric("총 급부", len(benefits))
-        st.metric("필터 적용 후", len(filtered))
-
-    st.markdown("---")
-    if not filtered:
-        st.info("필터 적용 후 표시할 급부가 없습니다.")
-        return
-
-    rows = []
-    for b in filtered:
-        rows.append({
-            "급부명": b.get("benefit_name") or b.get("benefitNm") or b.get("급부명") or b.get("담보명"),
-            "지급사유/조건": b.get("pay_reason") or b.get("payReason") or b.get("지급사유") or b.get("지급조건"),
-            "면책/감액/대기": b.get("exclusion") or b.get("exclusionText") or b.get("면책") or b.get("면책사항"),
-            "갱신구분": b.get("renew_type") or b.get("renewType") or b.get("갱신구분"),
-            "주/특약": b.get("product_type") or b.get("productType") or b.get("주특약구분") or b.get("계약구분"),
-            "급부유형": b.get("pay_type") or b.get("payType") or b.get("급부유형") or b.get("지급유형"),
-            "지급횟수": b.get("pay_limit_count") or b.get("payLimitCount") or b.get("지급횟수") or b.get("한도횟수"),
-            "한도금액": b.get("pay_limit_amount") or b.get("payLimitAmount") or b.get("지급한도") or b.get("한도금액"),
-        })
-    st.dataframe(rows, use_container_width=True)
-
-
-# =========================
-# Main
-# =========================
-def main():
-    st.set_page_config(page_title=APP_TITLE, layout="wide")
-    st.title(APP_TITLE)
-    st.caption(
-        "검색 버튼 없이 입력 즉시 자동완성 콤보에서 포함(contains) 후보를 보여주고, "
-        "선택 시 급부를 조회한 뒤 급부 필터링을 적용합니다. "
-        "(질병 유사도/일치율 조정 기능은 제거)"
-    )
-
-    client = ApiClient(API_BASE_URL)
-
-    # 상태
-    if "last_input_ts" not in st.session_state:
-        st.session_state.last_input_ts = 0.0
-    if "suggestions" not in st.session_state:
-        st.session_state.suggestions = []
-    if "selected_disease_id" not in st.session_state:
-        st.session_state.selected_disease_id = ""
-    if "selected_disease" not in st.session_state:
-        st.session_state.selected_disease = None
-    if "benefits" not in st.session_state:
-        st.session_state.benefits = []
-
-    st.markdown("### 질병명칭 (자동완성)")
-    disease_query = st.text_input(
-        "질병명칭을 입력하면 포함하는 후보가 즉시 표시됩니다.",
-        value=st.session_state.get("disease_query", ""),
-        key="disease_query",
-        placeholder="예: 심근, 당뇨, 뇌출혈 ..."
-    )
-
-    # 입력 변화 감지 및 디바운스 유사 처리
-    now = time.time()
-    prev_query = st.session_state.get("_prev_query", "")
-    if disease_query != prev_query:
-        st.session_state["_prev_query"] = disease_query
-        st.session_state.last_input_ts = now
-
-    # 디바운스 경과 시에만 조회
-    elapsed_ms = (now - st.session_state.last_input_ts) * 1000.0
-    should_fetch = len(_clean_text(disease_query)) >= MIN_QUERY_LEN and elapsed_ms >= DEBOUNCE_MS
-
-    # 후보 조회
-    if should_fetch:
-        try:
-            with st.spinner("후보 조회 중..."):
-                st.session_state.suggestions = client.suggest_diseases_contains(disease_query)
-        except Exception as e:
-            st.session_state.suggestions = []
-            st.error(f"자동완성 조회 오류: {e}")
-
-    suggestions = st.session_state.suggestions or []
-
-    # 콤보(Selectbox) 구성
-    # label은 사용자가 읽는 문자열, value는 item 보관
-    def _label(it: Dict[str, Any]) -> str:
-        name = it.get("name") or it.get("disease_name") or it.get("diseaseName") or ""
-        did = it.get("id") or it.get("disease_id") or it.get("diseaseId") or ""
-        # 코드가 있으면 같이 보여줌
-        return f"{name} ({did})" if did else f"{name}"
-
-    option_labels = ["(선택)"] + [_label(it) for it in suggestions]
-    selected_label = st.selectbox("질병 선택", options=option_labels, index=0, key="disease_selectbox")
-
-    # 선택 처리: 선택 시 급부 로딩
-    if selected_label and selected_label != "(선택)":
-        # label로 다시 찾기 (동일 label 중복 가능성이 있으면 id 기반으로 바꾸는 것을 권장)
-        idx = option_labels.index(selected_label) - 1
-        chosen = suggestions[idx] if 0 <= idx < len(suggestions) else None
-
-        if chosen:
-            disease_id = chosen.get("id") or chosen.get("disease_id") or chosen.get("diseaseId")
-            # 이미 같은 질병이면 재조회 방지
-            if disease_id and str(disease_id) != st.session_state.selected_disease_id:
-                st.session_state.selected_disease_id = str(disease_id)
-                st.session_state.selected_disease = chosen
-                try:
-                    with st.spinner("급부 조회 중..."):
-                        st.session_state.benefits = client.get_benefits_by_disease(str(disease_id))
-                except Exception as e:
-                    st.session_state.benefits = []
-                    st.error(f"급부 조회 오류: {e}")
-
-    # 급부/필터 영역
-    selected_disease = st.session_state.selected_disease
-    benefits = st.session_state.benefits or []
-
-    if selected_disease:
-        filters = render_filters(benefits)
-        filtered = apply_benefit_filters(benefits, filters)
-        render_benefits(selected_disease, benefits, filtered)
+    if rec_df.empty:
+        st.info("조건에 맞는 추천 결과가 없습니다. 최소 일치율을 낮추거나 다른 키워드로 시도해 보세요.")
     else:
-        st.info("질병명칭을 입력하고, 콤보에서 질병을 선택하세요.")
+        # 추천 결과가 1개면 자동 적용
+        if len(rec_df) == 1:
+            only_disease = rec_df.iloc[0]["질병명"]
+            signature = f"{query}|{min_match}|{only_disease}"
+            if st.session_state["last_auto_applied"] != signature:
+                st.session_state["last_auto_applied"] = signature
+                st.session_state["rec_selected_disease"] = only_disease
+                st.session_state["disease_selectbox"] = only_disease
+                st.session_state["criteria_selectbox"] = None
+                st.rerun()
+
+        show_df = rec_df[["질병명", "일치율(%)"]].copy()
+        show_df.insert(0, "선택", False)
+
+        if st.session_state["rec_selected_disease"]:
+            show_df.loc[show_df["질병명"] == st.session_state["rec_selected_disease"], "선택"] = True
+
+        edited = st.data_editor(
+            show_df,
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed",
+            disabled={"질병명": True, "일치율(%)": True},
+            column_config={
+                "선택": st.column_config.CheckboxColumn("선택"),
+                "질병명": st.column_config.TextColumn(width="large"),
+                "일치율(%)": st.column_config.NumberColumn(format="%.1f"),
+            },
+            key="rec_table",
+        )
+
+        checked = edited[edited["선택"] == True]["질병명"].tolist()
+        if len(checked) >= 1:
+            prev = st.session_state["rec_selected_disease"]
+            if prev and (prev in checked) and (len(checked) > 1):
+                new_choice = next((x for x in checked if x != prev), checked[0])
+            else:
+                new_choice = checked[0]
+
+            if new_choice != st.session_state["rec_selected_disease"]:
+                st.session_state["rec_selected_disease"] = new_choice
+                st.session_state["disease_selectbox"] = new_choice
+                st.session_state["criteria_selectbox"] = None
+                st.rerun()
+            else:
+                if len(checked) > 1:
+                    st.rerun()
+
+st.divider()
 
 
-if __name__ == "__main__":
-    main()
+# -------------------------
+# 질병/심사기준 선택
+# -------------------------
+st.subheader("질병 선택/조회")
+
+disease = st.selectbox("질병 선택", diseases, key="disease_selectbox")
+
+criteria_list = load_criteria_for_disease(DB_URL, disease)
+if not criteria_list:
+    st.info("선택된 질병에 대한 심사기준이 없습니다.")
+    st.stop()
+
+if (st.session_state["criteria_selectbox"] is None) or (st.session_state["criteria_selectbox"] not in criteria_list):
+    st.session_state["criteria_selectbox"] = criteria_list[0]
+
+crit = st.selectbox("심사기준 선택", criteria_list, key="criteria_selectbox")
+
+df = load_benefit_decisions(DB_URL, disease, crit).copy()
+df["decision"] = df["decision"].fillna("").astype(str).str.strip()
+df["benefit"] = df["benefit"].fillna("").astype(str).str.strip()
+
+# -------------------------
+# ✅ 인수결과값 요약 + 필터링 (확실히 보이도록)
+# -------------------------
+st.subheader("급부별 인수 결과")
+
+# 요약 테이블
+counts = df["decision"].replace("", "(빈값)").value_counts().reset_index()
+counts.columns = ["인수결과값", "건수"]
+
+# metric 형태 + 표 형태 둘 다 제공 (눈에 확 들어오게)
+c1, c2 = st.columns([1, 2])
+with c1:
+    st.metric("총 급부 수", int(len(df)))
+with c2:
+    st.dataframe(counts, hide_index=True, use_container_width=True)
+
+# 필터: multiselect (필터 존재가 명확)
+all_decisions = counts["인수결과값"].tolist()
+
+# 기본값: 전체 선택
+default_selected = all_decisions
+
+selected = st.multiselect(
+    "인수결과값 필터 (선택한 값만 아래 표에 표시)",
+    options=all_decisions,
+    default=default_selected,
+)
+
+if not selected:
+    st.warning("필터가 모두 해제되어 표시할 데이터가 없습니다.")
+    st.dataframe(df.iloc[0:0], use_container_width=True)
+else:
+    df_view = df.copy()
+    df_view["decision_show"] = df_view["decision"].replace("", "(빈값)")
+    df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
+
+    st.dataframe(df_view, use_container_width=True)
