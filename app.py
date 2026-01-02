@@ -202,8 +202,9 @@ disease_options = [""] + diseases
 # ✅ options에 disease_options를 넣어야 공란이 적용됨
 disease = st.selectbox(
     "질병 선택",
-    disease_options,
+    options=disease_options,
     key="disease_selectbox",
+    label_visibility="collapsed",
 )
 
 if not disease:
@@ -247,11 +248,11 @@ if (st.session_state["criteria_selectbox"] is None) or (st.session_state["criter
 st.subheader("심사기준 선택")
 
 crit = st.selectbox(
-    "",
-    criteria_list,
+    "심사기준 선택",          # label은 있어도 됨 (보이지 않음)
+    options=criteria_list,
     key="criteria_selectbox",
+    label_visibility="collapsed",
 )
-
 
 df = load_benefit_decisions(DB_URL, disease, crit).copy()
 df["decision"] = df["decision"].fillna("").astype(str).str.strip()
@@ -286,6 +287,7 @@ else:
     df_view["decision_show"] = df_view["decision"].replace("", "(빈값)")
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
     st.dataframe(df_view, use_container_width=True)
+
 
 
 
