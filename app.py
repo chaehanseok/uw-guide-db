@@ -44,6 +44,18 @@ def _query_df(db_path: str, sql: str, params: tuple = ()) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600)
+def _get_uw_rows_columns(db_url: str) -> set[str]:
+    """uw_rows 테이블 컬럼 목록을 set으로 반환"""
+    db_path = download_db_to_temp(db_url)
+    c = sqlite3.connect(db_path)
+    try:
+        cols_df = pd.read_sql("PRAGMA table_info(uw_rows)", c)
+        return set(cols_df["name"].astype(str).tolist())
+    finally:
+        c.close()
+
+
+@st.cache_data(ttl=3600)
 def load_all_diseases(db_url: str) -> list[str]:
     db_path = download_db_to_temp(db_url)
     df = _query_df(db_path, "SELECT DISTINCT disease FROM uw_rows ORDER BY disease")
@@ -88,25 +100,34 @@ def load_benefit_decisions(db_url: str, disease: str, criteria: str) -> pd.DataF
 def load_common_info_for_disease(db_url: str, disease: str) -> dict:
     """
     질병별 공통항목(필요서류/진단/TIP)을 criteria와 무관하게 조회.
-    컬럼명은 '필요서류', '진단', 'TIP'으로 확정된 상태를 전제로 함.
+    - 컬럼이 실제로 존재할 때만 조회
+    - 한글 컬럼명은 반드시 쌍따옴표로 quoting
     """
-    db_path = download_db_to_temp(db_url)
+    cols = _get_uw_rows_columns(db_url)
 
-    df = _query_df(
-        db_path,
-        """
-        SELECT DISTINCT
-            TRIM(COALESCE(필요서류, '')) AS 필요서류,
-            TRIM(COALESCE(진단, ''))     AS 진단,
-            TRIM(COALESCE(TIP, ''))      AS TIP
-        FROM uw_rows
-        WHERE disease = ?
-        """,
-        params=(disease,),
-    )
+    wanted = ["필요서류", "진단", "TIP"]
+    existing = [c for c in wanted if c in cols]
+    if not existing:
+        return {}
+
+    # SELECT 절을 존재하는 컬럼만 동적으로 구성
+    select_exprs = []
+    for col in existing:
+        # 예: TRIM(COALESCE("필요서류", '')) AS "필요서류"
+        select_exprs.append(f'TRIM(COALESCE("{col}", \'\')) AS "{col}"')
+
+    sql = f"""
+    SELECT DISTINCT
+        {", ".join(select_exprs)}
+    FROM uw_rows
+    WHERE disease = ?
+    """
+
+    db_path = download_db_to_temp(db_url)
+    df = _query_df(db_path, sql, params=(disease,))
 
     info = {}
-    for col in ["필요서류", "진단", "TIP"]:
+    for col in existing:
         vals = (
             df[col]
             .dropna()
@@ -164,20 +185,18 @@ st.divider()
 # -------------------------
 st.subheader("질병 선택/조회")
 
-# 공란 옵션 추가
 disease_options = [""] + diseases
 
-# ✅ (중요) options는 disease_options로 넣어야 공란이 표시됩니다.
+# ✅ options에 disease_options를 넣어야 공란이 적용됨
 disease = st.selectbox(
     "질병 선택",
     disease_options,
     key="disease_selectbox",
-    placeholder="질병명을 입력하거나 선택하세요",
 )
 
-# ✅ 모바일에서 위로 열리는 현상 완화:
-# selectbox 바로 아래에 충분한 공간을 확보하면(특히 키보드가 올라오는 모바일)
-# 드롭다운이 아래로 열릴 가능성이 크게 증가합니다.
+# ✅ Streamlit에서 드롭다운 '아래 고정'은 공식 지원이 없어 강제 불가
+# 대신, selectbox 아래에 공간을 확보하면(특히 모바일 키보드 등장 시)
+# 아래로 열릴 확률이 크게 증가합니다.
 st.markdown("<div style='height: 35vh'></div>", unsafe_allow_html=True)
 
 if not disease:
@@ -188,7 +207,6 @@ if not disease:
 # ✅ 질병 공통 정보(필요서류/진단/TIP) 표시 (criteria와 무관)
 # -------------------------
 common_info = load_common_info_for_disease(DB_URL, disease)
-
 if common_info:
     st.subheader("질병 공통 안내")
 
@@ -235,12 +253,10 @@ with c2:
     st.dataframe(counts, hide_index=True, use_container_width=True)
 
 all_decisions = counts["인수결과값"].tolist()
-default_selected = all_decisions
-
 selected = st.multiselect(
     "인수결과값 필터 (선택한 값만 아래 표에 표시)",
     options=all_decisions,
-    default=default_selected,
+    default=all_decisions,
 )
 
 if not selected:
