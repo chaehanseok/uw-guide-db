@@ -109,22 +109,70 @@ def load_benefit_decisions(db_url: str, disease: str, criteria: str) -> pd.DataF
 @st.cache_data(ttl=3600)
 def load_common_info_for_disease(db_url: str, disease: str) -> dict:
     db_path = download_db_to_temp(db_url)
-    df = _query_df(
+
+    def _clean_list(df: pd.DataFrame, col: str) -> list[str]:
+        if df.empty or col not in df.columns:
+            return []
+        s = df[col].dropna().astype(str).str.strip()
+
+        # "nan", "none" 같은 문자열 제거
+        s_lower = s.str.lower()
+        s = s[(s != "") & (s_lower != "nan") & (s_lower != "none")]
+
+        return s.unique().tolist()
+
+    # ✅ 필요서류만 단독 DISTINCT
+    df_need = _query_df(
         db_path,
         """
-        SELECT DISTINCT
-            nd.val AS need_doc,
-            dx.val AS diagnosis,
-            tp.val AS tip
+        SELECT DISTINCT nd.val AS need_doc
         FROM uw_rows u
-        JOIN dim_disease d     ON d.id = u.disease_id
-        JOIN dim_need_doc nd   ON nd.id = u.need_doc_id
-        JOIN dim_diagnosis dx  ON dx.id = u.diagnosis_id
-        JOIN dim_tip tp        ON tp.id = u.tip_id
+        JOIN dim_disease d    ON d.id = u.disease_id
+        JOIN dim_need_doc nd  ON nd.id = u.need_doc_id
         WHERE d.val = ?
         """,
         params=(disease,),
     )
+
+    # ✅ 진단만 단독 DISTINCT
+    df_dx = _query_df(
+        db_path,
+        """
+        SELECT DISTINCT dx.val AS diagnosis
+        FROM uw_rows u
+        JOIN dim_disease d     ON d.id = u.disease_id
+        JOIN dim_diagnosis dx  ON dx.id = u.diagnosis_id
+        WHERE d.val = ?
+        """,
+        params=(disease,),
+    )
+
+    # ✅ TIP만 단독 DISTINCT
+    df_tip = _query_df(
+        db_path,
+        """
+        SELECT DISTINCT tp.val AS tip
+        FROM uw_rows u
+        JOIN dim_disease d  ON d.id = u.disease_id
+        JOIN dim_tip tp     ON tp.id = u.tip_id
+        WHERE d.val = ?
+        """,
+        params=(disease,),
+    )
+
+    info = {}
+    need_docs = _clean_list(df_need, "need_doc")
+    diagnosis = _clean_list(df_dx, "diagnosis")
+    tips = _clean_list(df_tip, "tip")
+
+    if need_docs:
+        info["필요서류"] = need_docs
+    if diagnosis:
+        info["진단"] = diagnosis
+    if tips:
+        info["TIP"] = tips
+
+    return info
 
 def _uniq_nonempty(series: pd.Series) -> list[str]:
     s = series.copy()
@@ -286,6 +334,7 @@ else:
     df_view["decision_show"] = df_view["decision"].replace("", "(빈값)")
     df_view = df_view[df_view["decision_show"].isin(selected)].drop(columns=["decision_show"])
     st.dataframe(df_view, use_container_width=True)
+
 
 
 
